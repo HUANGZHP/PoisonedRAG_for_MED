@@ -159,5 +159,57 @@ cython_debug/
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
 
-datasets
-logs
+# generated data / large artifacts
+datasets/
+results/
+logs/
+models/
+
+# MIRAGE aux dirs
+MIRAGE/docs/
+MIRAGE/figs/
+MIRAGE/prediction/
+MIRAGE/rawdata/
+MIRAGE/src/
+
+# large binary files
+*.faiss
+*.index
+*.pt
+*.bin
+*.safetensors
+*.npy
+*.npz
+*.parquet
+*.jsonl
+*.index
+*.pt
+*.bin
+*.safetensors
+*.npy
+*.npz
+*.parquet
+*.jsonl
+# generated data / large artifacts
+datasets/
+results/
+logs/
+models/
+
+# MIRAGE aux dirs
+MIRAGE/docs/
+MIRAGE/figs/
+MIRAGE/prediction/
+MIRAGE/rawdata/
+MIRAGE/src/
+
+# large binary files
+*.faiss
+*.index
+*.pt
+*.bin
+*.safetensors
+*.npy
+*.npz
+*.parquet
+*.jsonl
