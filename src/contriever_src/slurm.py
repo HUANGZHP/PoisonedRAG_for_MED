@@ -1,3 +1,5 @@
+# Purpose: Implements src/contriever_src/slurm.py in the PoisonedRAG project.
+
 # Copyright (c) Facebook, Inc. and its affiliates.
 # All rights reserved.
 #

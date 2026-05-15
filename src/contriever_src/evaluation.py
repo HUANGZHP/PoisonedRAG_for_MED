@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Purpose: Implements src/contriever_src/evaluation.py in the PoisonedRAG project.
+
 # Copyright (c) Facebook, Inc. and its affiliates.
 # All rights reserved.
 #

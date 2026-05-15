@@ -1,0 +1,19 @@
+{
+  "model_info": {
+    "provider": "gpt",
+    "name": "deepseek-r1-0528"
+  },
+  "api_key_info": {
+    "base_url": "https://api.chatanywhere.tech/v1",
+    "api_keys": [
+      "sk-dPPfDtwcsfQ80HDmfJpDPlp8PwkarluzE6ceXNLZWtBrzwH7"
+    ],
+    "api_key_use": 0
+  },
+  "params": {
+    "temperature": 0.1,
+    "seed": 100,
+    "gpus": [],
+    "max_output_tokens": 300
+  }
+}

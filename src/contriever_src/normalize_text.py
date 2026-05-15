@@ -1,3 +1,5 @@
+# Purpose: Implements src/contriever_src/normalize_text.py in the PoisonedRAG project.
+
 """
 adapted from chemdataextractor.text.normalize
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

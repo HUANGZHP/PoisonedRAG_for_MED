@@ -1,3 +1,5 @@
+# Purpose: Implements src/models/Model.py in the PoisonedRAG project.
+
 import random
 import os
 import torch

@@ -1,7 +1,5 @@
-from .PaLM2 import PaLM2
-from .Vicuna import Vicuna
-from .GPT import GPT
-from .Llama import Llama
+# Purpose: Implements src/models/__init__.py in the PoisonedRAG project.
+
 import json
 
 def load_json(file_path):
@@ -17,12 +15,20 @@ def create_model(config_path):
 
     provider = config["model_info"]["provider"].lower()
     if provider == 'palm2':
+        from .PaLM2 import PaLM2
+
         model = PaLM2(config)
     elif provider == 'vicuna':
+        from .Vicuna import Vicuna
+
         model = Vicuna(config)
     elif provider == 'gpt':
+        from .GPT import GPT
+
         model = GPT(config)
-    elif provider == 'llama':
+    elif provider in ['llama', 'hf-local', 'qwen', 'deepseek']:
+        from .Llama import Llama
+
         model = Llama(config)
     else:
         raise ValueError(f"ERROR: Unknown provider {provider}")

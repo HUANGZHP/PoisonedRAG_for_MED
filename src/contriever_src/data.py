@@ -1,3 +1,5 @@
+# Purpose: Implements src/contriever_src/data.py in the PoisonedRAG project.
+
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved
 
 import os

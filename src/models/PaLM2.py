@@ -1,3 +1,5 @@
+# Purpose: Implements src/models/PaLM2.py in the PoisonedRAG project.
+
 import google.generativeai as palm
 import google.ai.generativelanguage as gen_lang
 import time

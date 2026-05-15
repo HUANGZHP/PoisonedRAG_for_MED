@@ -1,3 +1,5 @@
+# Purpose: Implements src/contriever_src/beir_utils.py in the PoisonedRAG project.
+
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved
 
 import os
@@ -6,6 +8,7 @@ from typing import List, Dict
 import numpy as np
 import torch
 import torch.distributed as dist
+from tqdm import tqdm
 
 import beir.util
 from beir.datasets.data_loader import GenericDataLoader
@@ -43,12 +46,35 @@ class DenseEncoderModel:
         self.lower_case = lower_case
         self.normalize_text = normalize_text
 
+    def _batch_encode(self, texts: List[str]):
+        if hasattr(self.tokenizer, "batch_encode_plus"):
+            return self.tokenizer.batch_encode_plus(
+                texts,
+                max_length=self.max_length,
+                padding=True,
+                truncation=True,
+                add_special_tokens=self.add_special_tokens,
+                return_tensors="pt",
+            )
+        return self.tokenizer(
+            texts,
+            max_length=self.max_length,
+            padding=True,
+            truncation=True,
+            add_special_tokens=self.add_special_tokens,
+            return_tensors="pt",
+        )
+
     def encode_queries(self, queries: List[str], batch_size: int, **kwargs) -> np.ndarray:
 
         if dist.is_initialized():
             idx = np.array_split(range(len(queries)), dist.get_world_size())[dist.get_rank()]
         else:
             idx = range(len(queries))
+
+        show_progress = bool(kwargs.get("show_progress_bar", False))
+        if dist.is_initialized() and dist.get_rank() != 0:
+            show_progress = False
 
         queries = [queries[i] for i in idx]
         if self.normalize_text:
@@ -58,19 +84,15 @@ class DenseEncoderModel:
 
         allemb = []
         nbatch = (len(queries) - 1) // batch_size + 1
+        batch_iter = range(nbatch)
+        if show_progress:
+            batch_iter = tqdm(batch_iter, total=nbatch, desc="Encoding queries", unit="batch")
         with torch.no_grad():
-            for k in range(nbatch):
+            for k in batch_iter:
                 start_idx = k * batch_size
                 end_idx = min((k + 1) * batch_size, len(queries))
 
-                qencode = self.tokenizer.batch_encode_plus(
-                    queries[start_idx:end_idx],
-                    max_length=self.max_length,
-                    padding=True,
-                    truncation=True,
-                    add_special_tokens=self.add_special_tokens,
-                    return_tensors="pt",
-                )
+                qencode = self._batch_encode(queries[start_idx:end_idx])
                 qencode = {key: value.cuda() for key, value in qencode.items()}
                 emb = self.query_encoder(**qencode, normalize=self.norm_query)
                 allemb.append(emb.cpu())
@@ -88,6 +110,10 @@ class DenseEncoderModel:
             idx = np.array_split(range(len(corpus)), dist.get_world_size())[dist.get_rank()]
         else:
             idx = range(len(corpus))
+
+        show_progress = bool(kwargs.get("show_progress_bar", False))
+        if dist.is_initialized() and dist.get_rank() != 0:
+            show_progress = False
         corpus = [corpus[i] for i in idx]
         corpus = [c["title"] + " " + c["text"] if len(c["title"]) > 0 else c["text"] for c in corpus]
         if self.normalize_text:
@@ -97,19 +123,15 @@ class DenseEncoderModel:
 
         allemb = []
         nbatch = (len(corpus) - 1) // batch_size + 1
+        batch_iter = range(nbatch)
+        if show_progress:
+            batch_iter = tqdm(batch_iter, total=nbatch, desc="Encoding corpus", unit="batch")
         with torch.no_grad():
-            for k in range(nbatch):
+            for k in batch_iter:
                 start_idx = k * batch_size
                 end_idx = min((k + 1) * batch_size, len(corpus))
 
-                cencode = self.tokenizer.batch_encode_plus(
-                    corpus[start_idx:end_idx],
-                    max_length=self.max_length,
-                    padding=True,
-                    truncation=True,
-                    add_special_tokens=self.add_special_tokens,
-                    return_tensors="pt",
-                )
+                cencode = self._batch_encode(corpus[start_idx:end_idx])
                 cencode = {key: value.cuda() for key, value in cencode.items()}
                 emb = self.doc_encoder(**cencode, normalize=self.norm_doc)
                 allemb.append(emb.cpu())

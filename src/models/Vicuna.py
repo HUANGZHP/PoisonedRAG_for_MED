@@ -1,3 +1,5 @@
+# Purpose: Implements src/models/Vicuna.py in the PoisonedRAG project.
+
 from fastchat.model import load_model, get_conversation_template
 import torch
 
