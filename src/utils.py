@@ -58,6 +58,11 @@ model_code_to_qmodel_name = {
         os.path.join(HF_MODEL_ROOT, "facebook", "contriever-msmarco"),
         os.path.join(HF_MODEL_ROOT, "contriever-msmarco"),
     ) or "facebook/contriever-msmarco",
+    "contriever-chinese": _pick_existing_path(
+        os.path.join(HF_MODEL_ROOT, "aqweteddy", "contriever-base-chinese"),
+        os.path.join(HF_MODEL_ROOT, "contriever-base-chinese"),
+        os.path.join(os.path.dirname(__file__), "..", "models", "aqweteddy", "contriever-base-chinese"),
+    ) or "aqweteddy/contriever-base-chinese",
     "ance": _pick_existing_path(
         os.path.join(HF_MODEL_ROOT, "sentence-transformers", "msmarco-roberta-base-ance-firstp"),
         os.path.join(HF_MODEL_ROOT, "msmarco-roberta-base-ance-firstp"),
@@ -72,6 +77,7 @@ model_code_to_qmodel_name = {
 model_code_to_cmodel_name = {
     "contriever": model_code_to_qmodel_name["contriever"],
     "contriever-msmarco": model_code_to_qmodel_name["contriever-msmarco"],
+    "contriever-chinese": model_code_to_qmodel_name["contriever-chinese"],
     "ance": model_code_to_qmodel_name["ance"],
     "dpr": "facebook/dpr-ctx_encoder-single-nq-base",
     "medcpt": _pick_existing_path(
@@ -95,6 +101,15 @@ LOCAL_INDEX_PATHS = {
 
 def contriever_get_emb(model, input):
     return model(**input)
+
+def contriever_chinese_get_emb(model, input):
+    """Average pooling for Chinese Contriever (BertRetriver with pooling='avg')."""
+    output = model(**input)
+    last_hidden = output.last_hidden_state
+    attention_mask = input["attention_mask"]
+    last_hidden = last_hidden.masked_fill(~attention_mask[..., None].bool(), 0.0)
+    emb = last_hidden.sum(dim=1) / attention_mask.sum(dim=1)[..., None]
+    return emb
 
 def dpr_get_emb(model, input):
     return model(**input).pooler_output
@@ -360,7 +375,14 @@ def get_medrag_retrieval_system(model_code: str, dataset: str):
 
 def load_models(model_code):
     assert (model_code in model_code_to_qmodel_name and model_code in model_code_to_cmodel_name), f"Model code {model_code} not supported!"
-    if 'contriever' in model_code:
+    if model_code == "contriever-chinese":
+        # Chinese Contriever: use AutoModel (BertRetriver) + custom avg pooling
+        model_name = model_code_to_qmodel_name[model_code]
+        model = AutoModel.from_pretrained(model_name)
+        c_model = model
+        tokenizer = AutoTokenizer.from_pretrained(model_name)
+        get_emb = contriever_chinese_get_emb
+    elif 'contriever' in model_code:
         if Contriever is None:
             raise ImportError("Contriever dependencies are missing. Please install required packages.")
         model = Contriever.from_pretrained(model_code_to_qmodel_name[model_code])

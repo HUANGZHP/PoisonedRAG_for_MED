@@ -47,7 +47,7 @@ class Contriever(BertModel):
         last_hidden = model_output["last_hidden_state"]
         last_hidden = last_hidden.masked_fill(~attention_mask[..., None].bool(), 0.0)
 
-        if self.config.pooling == "average":
+        if self.config.pooling == "average" or self.config.pooling == "avg":
             emb = last_hidden.sum(dim=1) / attention_mask.sum(dim=1)[..., None]
         elif self.config.pooling == "cls":
             emb = last_hidden[:, 0]

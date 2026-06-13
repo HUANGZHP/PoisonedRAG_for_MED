@@ -22,6 +22,7 @@ MEDRAG_DATASETS = {
     "pubmed": "pubmed",
     "statpearls": "statpearls",
     "textbooks": "textbooks",
+    "csco_colorectal_2026": "csco_colorectal_2026",
 }
 
 _FORMAT_PRIORITY = [".jsonl", ".parquet", ".txt", ".json"]

@@ -11,6 +11,12 @@ Choose the best option from the choices. Output only the single option letter (A
 Do not provide explanations, reasoning, extra sentences, or formatting. \
 \n\nContexts: [context] \n\nQuery: [question] \n\nOptions:\n[options]\n\nAnswer:'
 
+YESNO_PROMPT = 'You are a QA assistant. Answer the query using only the provided contexts. \
+Output ONLY a single word: yes or no. \
+Do not output any other text, explanations, reasoning, or formatting. \
+If the answer is not in the contexts, output exactly: I don\'t know. \
+\n\nContexts: [context] \n\nQuery: [question] \n\nAnswer:'
+
 
 def _format_options(options: dict) -> str:
     if not isinstance(options, dict) or not options:

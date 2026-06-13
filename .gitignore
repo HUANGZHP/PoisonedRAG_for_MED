@@ -143,6 +143,36 @@ venv.bak/
 .dmypy.json
 dmypy.json
 
+# IDE
+.vscode/
+.idea/
+
+# Project-specific: API keys & configs (privacy-sensitive)
+model_configs/
+
+# Project-specific: datasets (large, privacy-sensitive)
+datasets/
+
+# Project-specific: experiment results & logs
+results/
+logs/
+
+# Third-party submodules / external code
+Search-o1-main/
+MIRAGE/
+
+# Runtime artifacts
+nohup.out
+*.docx
+*.doc
+
+# Temporary / scratch scripts
+patch.py
+
+# OS files
+.DS_Store
+Thumbs.db
+
 # Pyre type checker
 .pyre/
 
