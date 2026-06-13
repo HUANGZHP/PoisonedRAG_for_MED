@@ -1,0 +1,17 @@
+{
+  "model_info": {
+    "provider": "gpt",
+    "name": "Qwen/Qwen3-8B-Instruct"
+  },
+  "api_key_info": {
+    "base_url": "",
+    "api_keys": ["YOUR_API_KEY"],
+    "api_key_use": 0
+  },
+  "params": {
+    "temperature": 0.1,
+    "seed": 100,
+    "gpus": [0],
+    "max_output_tokens": 300
+  }
+}
