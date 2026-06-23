@@ -27,6 +27,8 @@ class Llama(Model):
         self.trust_remote_code = self._to_bool(params.get("trust_remote_code", True))
         self.device_map = params.get("device_map", None)
         self.torch_dtype = self._resolve_dtype(str(params.get("torch_dtype", "float16")))
+        self.load_in_8bit = self._to_bool(params.get("load_in_8bit", False))
+        self.load_in_4bit = self._to_bool(params.get("load_in_4bit", False))
 
         self.hf_token = self._resolve_hf_token(api_info)
 
@@ -45,7 +47,22 @@ class Llama(Model):
         if self.device_map:
             model_kwargs["device_map"] = self.device_map
 
-        self.tokenizer = AutoTokenizer.from_pretrained(self.name, **tok_kwargs)
+        # Quantization: 8-bit takes priority over 4-bit; these require bitsandbytes.
+        if self.load_in_8bit or self.load_in_4bit:
+            from transformers import BitsAndBytesConfig
+            bnb_kwargs = {}
+            if self.load_in_8bit:
+                bnb_kwargs["load_in_8bit"] = True
+            else:
+                bnb_kwargs["load_in_4bit"] = True
+            # bnb_4bit_compute_dtype defaults to torch_dtype
+            if self.load_in_4bit:
+                bnb_kwargs["bnb_4bit_compute_dtype"] = self.torch_dtype
+            model_kwargs["quantization_config"] = BitsAndBytesConfig(**bnb_kwargs)
+            # bitsandbytes handles device placement; don't pass torch_dtype
+            model_kwargs.pop("torch_dtype", None)
+
+        self.tokenizer = self._load_tokenizer_with_fix(tok_kwargs)
         self.model = AutoModelForCausalLM.from_pretrained(self.name, **model_kwargs)
 
         # --- Fix pad token ---
@@ -68,7 +85,10 @@ class Llama(Model):
         else:
             self._stop_token_ids = [self.tokenizer.eos_token_id]
 
-        if self.device_map is None:
+        # Move model to target device only when not using device_map or quantization
+        # (bitsandbytes / device_map handle placement automatically).
+        _has_quant = "quantization_config" in model_kwargs
+        if self.device_map is None and not _has_quant:
             target = "cuda" if (self.device == "cuda" and torch.cuda.is_available()) else "cpu"
             self.model = self.model.to(target)
 
@@ -78,6 +98,33 @@ class Llama(Model):
             self.input_device = next(self.model.parameters()).device
         except StopIteration:
             self.input_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    def _load_tokenizer_with_fix(self, tok_kwargs):
+        """Load tokenizer, fixing empty special tokens if needed."""
+        import tempfile, json, shutil
+        from pathlib import Path
+        try:
+            return AutoTokenizer.from_pretrained(self.name, **tok_kwargs)
+        except (RecursionError, RuntimeError):
+            pass
+        # Llama-1 models may have empty bos/eos/unk="" → fix in a temp copy
+        tmp = Path(tempfile.mkdtemp())
+        try:
+            src = Path(self.name)
+            for f in src.iterdir():
+                if f.is_file() and not f.name.startswith('pytorch_model'):
+                    shutil.copy2(f, tmp / f.name)
+            tcfg = tmp / 'tokenizer_config.json'
+            if tcfg.exists():
+                d = json.loads(tcfg.read_text())
+                for k, v in {'bos_token': '<s>', 'eos_token': '</s>', 'unk_token': '<unk>'}.items():
+                    if k in d and (not d[k] or (isinstance(d[k], str) and d[k].strip() == '')):
+                        d[k] = v
+                d['model_max_length'] = 2048
+                tcfg.write_text(json.dumps(d, indent=2))
+            return AutoTokenizer.from_pretrained(str(tmp), **tok_kwargs)
+        finally:
+            shutil.rmtree(str(tmp), ignore_errors=True)
 
     @staticmethod
     def _to_bool(v):
@@ -116,7 +163,7 @@ class Llama(Model):
         return None
 
     def _build_inputs(self, msg: str):
-        if self.use_chat_template and hasattr(self.tokenizer, "apply_chat_template"):
+        if self.use_chat_template and hasattr(self.tokenizer, "apply_chat_template") and self.tokenizer.chat_template is not None:
             templated = self.tokenizer.apply_chat_template(
                 [{"role": "user", "content": msg}],
                 tokenize=True,

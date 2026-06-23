@@ -1,17 +1,17 @@
 {
   "model_info": {
-    "provider": "gpt",
-    "name": "Qwen/Qwen3-8B-Instruct"
+    "provider": "qwen",
+    "name": "/home/HF_Model/Qwen/Qwen3-8B",
+    "model_cls": "AutoModelForCausalLM",
+    "tokenizer_cls": "AutoTokenizer"
   },
-  "api_key_info": {
-    "base_url": "",
-    "api_keys": ["YOUR_API_KEY"],
-    "api_key_use": 0
-  },
+  "api_key_info": null,
   "params": {
     "temperature": 0.1,
     "seed": 100,
     "gpus": [0],
-    "max_output_tokens": 300
+    "max_output_tokens": 1024,
+    "load_in_8bit": true,
+    "load_in_4bit": false
   }
 }

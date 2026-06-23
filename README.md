@@ -10,6 +10,8 @@
 | **黑盒攻击** (LM_targeted) | 用 LLM 生成伪科学文章注入检索结果前列 |
 | **白盒攻击** (hotflip) | 利用检索器梯度逐 token 替换字符 |
 | **裁判过滤** (Judge) | 额外 LLM 检测对抗文本并拦截 |
+| **防御前后 F1 对比** | 启用法官时同时报告 pre-defense 和 post-defense 的注入成功率 |
+| **8-bit 量化加载** | Qwen3/Llama 等本地模型支持 load_in_8bit / load_in_4bit，节省显存 |
 | **Agentic RAG** (Search-o1) | 多轮「搜索→推理→再搜索」循环 |
 | **Reason-in-Docs** (RiD) | 对检索文档逐篇分析，提取有用信息 |
 | **RiD 防御模式** | 严格相关性过滤，丢弃不相关/误导性文档 |
@@ -17,8 +19,8 @@
 ## 1. 环境与依赖
 
 ```bash
-conda create -n PoisonedRAG_for_Med python=3.10 -y
-conda activate PoisonedRAG_for_Med
+conda create -n PoisonedRAG python=3.10 -y
+conda activate PoisonedRAG
 pip install -r requirements.txt
 ```
 
@@ -241,346 +243,219 @@ python main.py --model_name llama7b ...
 python main.py --model_name llama13b ...
 ```
 
-#### 2.5.4 验证 LLM 是否正常
 
-```bash
-python -c "
-from src.models import create_model
-llm = create_model('model_configs/gpt4_config.json')
-response = llm.query('Hello, say hi!')
-print('Response:', response)
-"
-```
+### 2.6 核心配置
 
-## 3. 组合速览
+- **Corpus**: pubmed / statpearls / textbooks（MedRAG），hotpotqa / nq / msmarco（BEIR）
+- **Query** 来源: MIRAGE 导出 / BEIR 内置 / 自定义（adv_json）
+- **Retriever**: medcpt / contriever / dpr / ance / bm25
+- **LLM**: model_configs/<name>_config.json
 
-- Corpus: pubmed / statpearls / textbooks（MedRAG），hotpotqa / nq / msmarco（BEIR）
-- Query 来源: MIRAGE 导出 / BEIR 内置 / 自定义（adv_json）
-- Retriever: medcpt / contriever / dpr / ance / bm25
-- LLM: model_configs/<name>_config.json
-- **Agentic RAG**: 支持 `--agentic_rag` / `--reason_in_docs` / `--rid_defense`
-- **裁判过滤**: 支持 `--judge_model_name` / `--judge_model_config_path`
 
-## 4. 完整流程
+## 3. 完整流程
 
-### 4.1 准备 queries
-
-#### 4.1.1 MIRAGE 导出（推荐用于 MedRAG corpus）
+### 3.1 导出 MIRAGE queries
 
 ```bash
 python -u gen_mirage_queries.py --dataset pubmedqa --limit 60 \
   --output_prefix results/adv_targeted_results/mirage_pubmedqa_n60
 ```
 
-产物：`*.json` / `*.ids` / `*.queries.json`
+产物：`*.json`（对抗文本标签）/ `*.ids`（query id）/ `*.queries.json`（检索用）
 
-#### 4.1.2 医学课程选择题解析（生成对抗文本的 query 来源）
-
-```bash
-# 解析 病程单选题-DeepSeek.docx → adv_json + ids + queries
-python parse_course_queries.py
-```
-
-产物：
-- `results/adv_targeted_results/course_exam.json`（直接可用作 `--adv_json_path`）
-- `results/adv_targeted_results/course_exam.ids`
-- `results/adv_targeted_results/course_exam.queries.json`
-
-### 4.2 生成检索结果
+### 3.2 生成检索结果
 
 ```bash
 python -u evaluate_beir.py \
   --model_code <medcpt|contriever|dpr|ance|bm25> \
   --dataset <pubmed|statpearls|textbooks|hotpotqa|nq|msmarco> \
-  --split test \
+  --split test --top_k 100 \
   --queries-json <path/to/queries.json> \
-  --result_output <path/to/retrieval.json> \
-  --top_k 100 --gpu_id 0
+  --result_output <path/to/retrieval.json>
 ```
 
-### 4.3 生成攻击文本
-
-#### 4.3.1 标准 BEIR 数据集（用于 hotpotqa / nq / msmarco）
+### 3.3 生成攻击文本
 
 ```bash
+# 黑盒攻击文本（LM_targeted）
 python gen_adv.py \
-  --eval_model_code contriever \
-  --eval_dataset hotpotqa \
-  --model_name gpt4 \
-  --adv_per_query 5 --data_num 60 \
-  --save_path results/adv_targeted_results
-```
+  --eval_model_code contriever --eval_dataset <dataset> \
+  --model_name gpt4 --adv_per_query 5 --data_num 60
 
-#### 4.3.2 MCQ 定向攻击（用于 MIRAGE medqa 等选择题子集）
-
-将完整题干 + 选项输入 LLM，明确指向某个错误选项：
-
-```bash
+# MCQ 定向攻击（题干+选项整体输入）
 python gen_adv_for_mcq.py \
-  --model_name gpt4.1mini \
-  --benchmark_path MIRAGE/benchmark.json \
-  --mirage_dataset medqa \
-  --concurrency 10 \
-  --output results/adv_targeted_results/mirage_medqa_mcq.json
+  --model_name gpt4.1mini --benchmark_path MIRAGE/benchmark.json \
+  --mirage_dataset medqa --concurrency 10
 ```
 
-### 4.4 运行 main（标准攻击评测）
+### 3.4 运行评测
+
+`agentic_main.py` 兼容 `main.py` 全部参数，额外支持 Agentic RAG / 裁判 / RiD 防御。
 
 ```bash
 # 无攻击
-python -u main.py \
-  --eval_dataset <corpus> --eval_model_code <retriever> \
+python -u agentic_main.py \
+  --eval_model_code <retriever> --eval_dataset <corpus> \
   --model_name <llm> --top_k 5 --attack_method None \
-  --retrieval_results_path <retrieval.json> \
-  --M <N> --name <run_name>
+  --agentic_rag --rag_max_turns 3 \
+  --retrieval_results_path <retrieval.json> --name <run_name>
 
-# 攻击（黑/白盒）
-python -u main.py \
-  --eval_dataset <corpus> --eval_model_code <retriever> \
-  --model_name <llm> --top_k 5 \
-  --attack_method <LM_targeted|hotflip> \
-  --adv_source <corpus|json> \
-  --adv_json_path <adv.json> --target_ids_path <ids.txt> \
+# 黑盒攻击 + 裁判
+python -u agentic_main.py \
+  --eval_model_code <retriever> --eval_dataset <corpus> \
+  --model_name <llm> --judge_model_name <judge_llm> --top_k 5 \
+  --attack_method LM_targeted --agentic_rag --rag_max_turns 3 \
+  --adv_source json --adv_json_path <adv.json> --target_ids_path <ids.txt> \
   --retrieval_results_path <retrieval.json> \
   --adv_per_query 5 --M <N> --name <run_name>
 
-# 攻击 + 裁判过滤
-python -u main.py \
-  --eval_dataset <corpus> --eval_model_code <retriever> \
-  --model_name <llm> --top_k 5 \
-  --attack_method LM_targeted \
-  --judge_model_name gpt4.1mini \              # ← 启用裁判
-  --adv_source json \
-  --adv_json_path <adv.json> \
-  --target_ids_path <ids.txt> \
+# 白盒攻击（无裁判）
+python -u agentic_main.py \
+  --eval_model_code <retriever> --eval_dataset <corpus> \
+  --model_name <llm> --judge_model_name None --top_k 5 \
+  --attack_method hotflip --agentic_rag --rag_max_turns 3 \
+  --adv_source json --adv_json_path <adv.json> --target_ids_path <ids.txt> \
   --retrieval_results_path <retrieval.json> \
   --adv_per_query 5 --M <N> --name <run_name>
 ```
 
-### 4.5 Agentic RAG（Search-o1 风格）
+关键参数：
 
-支持多轮「搜索→推理→再搜索」循环，LLM 通过特殊标记 `<|begin_search_query|>...<|end_search_query|>` 自主触发检索。
+| 参数 | 说明 |
+|------|------|
+| `--attack_method` | `None` / `LM_targeted` / `hotflip` |
+| `--judge_model_name` | 裁判 LLM 名称，`None` 关闭 |
+| `--agentic_rag` | 启用搜索-推理循环 |
+| `--rid_defense` | 启用严格相关性过滤 |
+| `--rag_max_turns` | 最大搜索轮次（默认 3） |
+| `--M` | 每轮评测 query 数 |
+| `--repeat_times` | 重复轮数（最终 ASR 取均值） |
+
+> 如需指定 GPU：`CUDA_VISIBLE_DEVICES=<gpu_id> python -u agentic_main.py ...`，或通过 `--gpu_id` 参数。
+
+### 3.5 复现实验（Qwen3-8B + PubMed + PubMedQA + Contriever）
 
 ```bash
-# Agentic RAG（无攻击，Reason-in-Docs + 裁判过滤）
-python -u agentic_main.py \
-  --eval_dataset <corpus> --eval_model_code <retriever> \
-  --model_name <llm> --top_k 5 \
-  --attack_method None \
-  --agentic_rag \                               # ← 启用 Agentic RAG 循环
-  --reason_in_docs \                             # ← 启用 RiD 逐篇分析
-  --rag_max_turns 3 \                            # ← 最大搜索轮次
-  --rag_verbose \                                # ← 打印详细过程
-  --judge_model_name gpt4.1mini \                # ← 启用裁判过滤
-  --retrieval_results_path <retrieval.json> \
-  --name <run_name>
+conda activate PoisonedRAG
 
-# Agentic RAG + 防御模式（严格相关性过滤）
+# === noattack（基线，无攻击无裁判） ===
 python -u agentic_main.py \
-  --eval_dataset <corpus> --eval_model_code <retriever> \
-  --model_name <llm> --top_k 5 \
-  --attack_method None \
-  --agentic_rag \
-  --reason_in_docs \
-  --rid_defense \                                # ← 防御模式
-  --rag_max_turns 3 \
-  --retrieval_results_path <retrieval.json> \
-  --name <run_name>
-
-# 仅 Reason-in-Docs（无 Agentic 循环）
-python -u agentic_main.py \
-  --eval_dataset <corpus> --eval_model_code <retriever> \
-  --model_name <llm> --top_k 5 \
-  --attack_method None \
-  --reason_in_docs \                             # ← 只启用 RiD
-  --rid_defense \
-  --retrieval_results_path <retrieval.json> \
-  --name <run_name>
-
-# Agentic RAG + 攻击（黑盒）
-python -u agentic_main.py \
-  --eval_dataset <corpus> --eval_model_code <retriever> \
-  --model_name <llm> --top_k 5 \
-  --attack_method LM_targeted \
-  --agentic_rag --reason_in_docs \
-  --judge_model_name gpt4.1mini \
+  --eval_model_code contriever \       # 检索器
+  --eval_dataset pubmed \              # 语料库
+  --model_name qwen3_8b \              # 生成模型
+  --top_k 5 \                          # 检索 top-K
+  --attack_method None \               # 不攻击
+  --agentic_rag --rag_max_turns 3 \    # Agentic RAG 多轮搜索
   --adv_source json \
-  --adv_json_path <adv.json> \
-  --target_ids_path <ids.txt> \
-  --retrieval_results_path <retrieval.json> \
-  --adv_per_query 5 --M <N> --name <run_name>
-```
+  --adv_json_path results/adv_targeted_results/mirage_pubmedqa_all.json \
+  --target_ids_path results/adv_targeted_results/mirage_pubmedqa_all.ids \
+  --retrieval_results_path results/beir_results/mirage_pubmedqa_all-contriever.json \
+  --adv_per_query 5 \                  # 每 query 对抗文本数
+  --M 500 \                            # 每轮 query 数
+  --repeat_times 10 \                  # 重复轮数
+  --name pubmed_qwen3_noattack         # 运行名称
 
-> **参数说明**: `agentic_main.py` 完全兼容 `main.py` 的所有参数（`--adv_source`、`--adv_json_path`、`--target_ids_path` 等），同时新增以下参数：
-> - `--agentic_rag`：启用搜索-推理循环
-> - `--reason_in_docs`：启用 Reason-in-Documents 模块
-> - `--rid_defense`：启用严格相关性过滤（防御模式）
-> - `--rag_max_turns`：最大搜索轮次（默认 3）
-> - `--rag_verbose`：打印详细过程
-> - `--judge_model_name`：裁判 LLM 名称
-> - `--judge_model_config_path`：裁判 LLM 配置路径
-## 5. 组合示例
-
-### 示例 A：pubmed + MIRAGE pubmedqa + medcpt + gpt4（标准流程）
-
-```bash
-# ===== 1. 导出 MIRAGE queries =====
-python -u gen_mirage_queries.py --dataset pubmedqa --limit 60 \
-  --output_prefix results/adv_targeted_results/mirage_pubmedqa_n60
-
-# ===== 2. MedCPT 检索 =====
-python -u evaluate_beir.py --model_code medcpt --dataset pubmed \
-  --queries-json results/adv_targeted_results/mirage_pubmedqa_n60.queries.json \
-  --result_output results/beir_results/pubmed_medcpt_mirage_pubmedqa_n60.json \
-  --top_k 100 --use_faiss_gpu True --gpu_id 0
-
-# ===== 3. 无攻击 =====
-python -u main.py \
-  --eval_model_code medcpt --eval_dataset pubmed \
-  --model_name gpt4 --top_k 5 --attack_method None \
-  --adv_json_path results/adv_targeted_results/mirage_pubmedqa_n60.json \
-  --target_ids_path results/adv_targeted_results/mirage_pubmedqa_n60.ids \
-  --retrieval_results_path results/beir_results/pubmed_medcpt_mirage_pubmedqa_n60.json \
-  --M 60 --name pubmed_pubmedqa_medcpt_gpt4_noattack
-
-# ===== 4. 黑盒攻击 =====
-python -u main.py \
-  --eval_model_code medcpt --eval_dataset pubmed \
-  --model_name gpt4 --top_k 5 --attack_method LM_targeted \
-  --adv_source corpus \
-  --adv_json_path results/adv_targeted_results/mirage_pubmedqa_n60.json \
-  --target_ids_path results/adv_targeted_results/mirage_pubmedqa_n60.ids \
-  --retrieval_results_path results/beir_results/pubmed_medcpt_mirage_pubmedqa_n60.json \
-  --adv_per_query 5 --M 60 \
-  --name pubmed_pubmedqa_medcpt_gpt4_blackbox
-
-# ===== 5. 黑盒攻击 + 裁判过滤 =====
-python -u main.py \
-  --eval_model_code medcpt --eval_dataset pubmed \
-  --model_name gpt4 --top_k 5 --attack_method LM_targeted \
-  --judge_model_name gpt4.1mini \                    # ← 启用裁判 LLM
-  --adv_source corpus \
-  --adv_json_path results/adv_targeted_results/mirage_pubmedqa_n60.json \
-  --target_ids_path results/adv_targeted_results/mirage_pubmedqa_n60.ids \
-  --retrieval_results_path results/beir_results/pubmed_medcpt_mirage_pubmedqa_n60.json \
-  --adv_per_query 5 --M 60 \
-  --name pubmed_pubmedqa_medcpt_gpt4_judge
-```
-
-### 示例 B：textbooks + MIRAGE medqa + medcpt + llama7b（白盒）
-
-```bash
-# ===== 1. 导出 MIRAGE queries =====
-python -u gen_mirage_queries.py --dataset medqa --limit 60 \
-  --output_prefix results/adv_targeted_results/mirage_medqa_n60
-
-# ===== 2. MedCPT 检索 =====
-python -u evaluate_beir.py --model_code medcpt --dataset textbooks \
-  --queries-json results/adv_targeted_results/mirage_medqa_n60.queries.json \
-  --result_output results/beir_results/textbooks_medcpt_mirage_medqa_n60.json \
-  --top_k 100 --use_faiss_gpu True --gpu_id 0
-
-# ===== 3. 白盒攻击 =====
-python -u main.py \
-  --eval_model_code medcpt --eval_dataset textbooks \
-  --model_name llama7b --top_k 5 --attack_method hotflip \
-  --adv_source corpus \
-  --adv_json_path results/adv_targeted_results/mirage_medqa_n60.json \
-  --target_ids_path results/adv_targeted_results/mirage_medqa_n60.ids \
-  --retrieval_results_path results/beir_results/textbooks_medcpt_mirage_medqa_n60.json \
-  --adv_per_query 5 --M 60 \
-  --name textbooks_medqa_medcpt_llama7b_whitebox
-```
-
-### 示例 C：hotpotqa + contriever + gpt4（BEIR 数据集，内置 queries）
-
-```bash
-# ===== 1. Contriever 检索（hotpotqa 自动下载） =====
-python -u evaluate_beir.py --model_code contriever --dataset hotpotqa \
-  --result_output results/beir_results/hotpotqa_contriever.json \
-  --top_k 100 --gpu_id 0
-
-# ===== 2. 用 gpt4 生成攻击文本 =====
-python -u gen_adv.py \
-  --eval_model_code contriever --eval_dataset hotpotqa \
-  --model_name gpt4 --adv_per_query 5 --data_num 60 \
-  --save_path results/adv_targeted_results
-
-# ===== 3. 黑盒攻击 =====
-python -u main.py \
-  --eval_model_code contriever --eval_dataset hotpotqa \
-  --model_name gpt4 --top_k 5 --attack_method LM_targeted \
-  --adv_source json \
-  --adv_json_path results/adv_targeted_results/hotpotqa.json \
-  --retrieval_results_path results/beir_results/hotpotqa_contriever.json \
-  --adv_per_query 5 --M 60 \
-  --name hotpotqa_contriever_gpt4_blackbox
-```
-
-### 示例 D：MCQ 定向攻击 + medqa + gpt4.1mini
-
-```bash
-# ===== 1. 生成 MCQ 对抗文本（题干+选项整体输入） =====
-python gen_adv_for_mcq.py \
-  --model_name gpt4.1mini \
-  --benchmark_path MIRAGE/benchmark.json \
-  --mirage_dataset medqa \
-  --concurrency 10 \
-  --output results/adv_targeted_results/mirage_medqa_mcq.json
-
-# ===== 2. Contriever 检索 =====
-python -u evaluate_beir.py --model_code contriever --dataset pubmed \
-  --queries-json results/adv_targeted_results/mirage_medqa_mcq.queries.json \
-  --result_output results/beir_results/pubmed_contriever_medqa_mcq.json \
-  --top_k 100 --gpu_id 0
-
-# ===== 3. 黑盒攻击 =====
-python -u main.py \
-  --eval_model_code contriever --eval_dataset pubmed \
-  --model_name gpt4.1mini --top_k 5 \
-  --attack_method LM_targeted --adv_source json \
-  --adv_json_path results/adv_targeted_results/mirage_medqa_mcq.json \
-  --target_ids_path results/adv_targeted_results/mirage_medqa_mcq.ids \
-  --retrieval_results_path results/beir_results/pubmed_contriever_medqa_mcq.json \
-  --adv_per_query 5 --M <N> \
-  --name pubmed_medqa_gpt41mini_blackbox_mcq
-```
-
-### 示例 F：使用裁判模型进行过滤（Judge Defense）
-
-裁判 LLM 参数适用于 `main.py` 和 `agentic_main.py`：
-
-```bash
-# main.py + 裁判
-python -u main.py \
-  --eval_model_code contriever --eval_dataset pubmed \
-  --model_name gpt4 --top_k 5 --attack_method LM_targeted \
-  --judge_model_name gpt4.1mini \                 # ← 裁判模型名称
-  --judge_model_config_path model_configs/gpt4.1mini_config.json \  # ← 或指定配置路径
-  --adv_source json \
-  --adv_json_path results/adv_targeted_results/mirage_pubmedqa_n60.json \
-  --target_ids_path results/adv_targeted_results/mirage_pubmedqa_n60.ids \
-  --retrieval_results_path results/beir_results/pubmed_medcpt_mirage_pubmedqa_n60.json \
-  --M 60 --name pubmed_judge_test
-
-# agentic_main.py + 裁判 + RiD 防御
+# === blackbox（黑盒攻击 + 裁判防御） ===
 python -u agentic_main.py \
-  --eval_model_code contriever --eval_dataset pubmed \
-  --model_name gpt4 --top_k 5 --attack_method LM_targeted \
-  --judge_model_name gpt4.1mini \
-  --agentic_rag --reason_in_docs --rid_defense \
+  --eval_model_code contriever \
+  --eval_dataset pubmed \
+  --model_name qwen3_8b \
+  --judge_model_name qwen3_8b \        # 裁判模型（与生成同一模型）
+  --top_k 5 \
+  --attack_method LM_targeted \        # 黑盒攻击
+  --agentic_rag --rag_max_turns 3 \
   --adv_source json \
-  --adv_json_path results/adv_targeted_results/mirage_pubmedqa_n60.json \
-  --target_ids_path results/adv_targeted_results/mirage_pubmedqa_n60.ids \
-  --retrieval_results_path results/beir_results/pubmed_medcpt_mirage_pubmedqa_n60.json \
-  --adv_per_query 5 --M 60 --name pubmed_agentic_judge_defense
+  --adv_json_path results/adv_targeted_results/mirage_pubmedqa_all.json \
+  --target_ids_path results/adv_targeted_results/mirage_pubmedqa_all.ids \
+  --retrieval_results_path results/beir_results/mirage_pubmedqa_all-contriever.json \
+  --adv_per_query 5 --M 500 --repeat_times 10 \
+  --name pubmed_qwen3_blackbox
+
+# === whitebox（纯白盒攻击，无裁判） ===
+python -u agentic_main.py \
+  --eval_model_code contriever \
+  --eval_dataset pubmed \
+  --model_name qwen3_8b \
+  --judge_model_name None \            # 关闭裁判
+  --top_k 5 \
+  --attack_method hotflip \            # 白盒梯度攻击
+  --agentic_rag --rag_max_turns 3 \
+  --adv_source json \
+  --adv_json_path results/adv_targeted_results/mirage_pubmedqa_all.json \
+  --target_ids_path results/adv_targeted_results/mirage_pubmedqa_all.ids \
+  --retrieval_results_path results/beir_results/mirage_pubmedqa_all-contriever.json \
+  --adv_per_query 5 --M 500 --repeat_times 10 \
+  --name pubmed_qwen3_whitebox
 ```
 
-## 6. 输出位置
+> 后台运行加 `nohup ... > log.out 2>&1 &`。GPU 指定：`CUDA_VISIBLE_DEVICES=<id>` 或 `--gpu_id <id>`。
 
-- adv / ids / queries: results/adv_targeted_results/
-- 检索结果: results/beir_results/
-- 评测结果: results/query_results/<query_results_dir>/
-- 日志: logs/<query_results_dir>_logs/
+预期结果：
+
+| 实验 | ASR | F1 | 说明 |
+|------|:---:|:---:|------|
+| noattack | ~0.25 | N/A | 基线错误率 |
+| blackbox (LM_targeted) | ~0.89 | 0.78 | 黑盒攻击 + 裁判防御 |
+| whitebox (hotflip) | ~0.88 | 0.95 | 纯白盒攻击，无裁判 |
+
+## 4. 查看运行结果
+
+运行日志输出至 `logs/user_runs_logs/<name>.out`，最终结果示例：
+
+```
+ASR: [0.88]
+ASR Mean: 0.88
+
+Ret (pre-defense): [[5, 4, 5, ...], ...]
+Precision mean (pre-defense): 0.95
+Recall mean (pre-defense): 0.95
+F1 mean (pre-defense): 0.95
+
+Ret (post-defense): [[0, 1, 0, ...], ...]
+Precision mean (post-defense): 0.11
+Recall mean (post-defense): 0.11
+F1 mean (post-defense): 0.11
+
+Ending...
+```
+
+### 指标说明
+
+| 指标 | 含义 |
+|------|------|
+| **ASR Mean** | 攻击成功率 — 被对抗文本误导导致错误回答的问题占比 |
+| **ASR** | 逐轮次的 ASR 列表（每轮 M 个 query） |
+| **F1 (pre-defense)** | 裁判过滤**前**的对抗文本检索成功率（仅当启用 judge 时显示） |
+| **F1 (post-defense)** | 裁判过滤**后**的对抗文本残留率 |
+| **Precision / Recall** | 对抗文本在 top-K 检索结果中的精确率 / 召回率 |
+
+### 快速查看结果
+
+```bash
+# 查看最终 ASR 和 F1
+grep -aE "ASR Mean|F1 mean" logs/user_runs_logs/qwen3_whitebox_v5.out
+
+# 查看逐轮进度
+grep -a "Target Question" logs/user_runs_logs/qwen3_whitebox_v5.out | tail -5
+
+# 查看完整流程（从启动到结束）
+grep -aE "Namespace|Using|Doing|ASR Mean|F1 mean|Ending" logs/user_runs_logs/*.out
+```
+
+### 结果文件
+
+| 路径 | 内容 |
+|------|------|
+| `logs/user_runs_logs/<name>.out` | 完整运行日志 |
+| `results/query_results/<dir>/<name>.json` | 逐 query 的详细结果（含 model output、parsed label 等） |
+
+## 5. 输出位置
+
+| 类型 | 路径 | 格式 |
+|------|------|------|
+| 对抗文本 / ids / queries | `results/adv_targeted_results/` | `.json` / `.ids` / `.queries.json` |
+| 检索结果 | `results/beir_results/` | `.json` |
+| 评测结果（逐 query 详情） | `results/query_results/<dir>/<name>.json` | `.json` |
+| 运行日志 | `logs/user_runs_logs/<name>.out` | 文本 |
 
 

@@ -40,4 +40,7 @@ class Model:
     
     def initialize_gpus(self):
         os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-        os.environ["CUDA_VISIBLE_DEVICES"] = ','.join(self.gpus)
+        # Only set CUDA_VISIBLE_DEVICES if not already set externally;
+        # changing it after CUDA init breaks torch.cuda.is_available().
+        if not os.environ.get("CUDA_VISIBLE_DEVICES"):
+            os.environ["CUDA_VISIBLE_DEVICES"] = ','.join(self.gpus)

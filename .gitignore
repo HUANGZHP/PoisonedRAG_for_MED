@@ -147,6 +147,9 @@ dmypy.json
 .vscode/
 .idea/
 
+# Project-specific: API keys & configs (privacy-sensitive)
+model_configs/
+
 # Project-specific: datasets (large, privacy-sensitive)
 datasets/
 
