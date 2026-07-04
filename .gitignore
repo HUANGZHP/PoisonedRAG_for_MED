@@ -159,7 +159,6 @@ logs/
 
 # Third-party submodules / external code
 Search-o1-main/
-MIRAGE/
 
 # Runtime artifacts
 nohup.out
