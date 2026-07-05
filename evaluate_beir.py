@@ -68,6 +68,21 @@ def parse_gpu_ids(raw_gpu_ids: str):
     return gpu_ids
 
 
+def apply_tokenizer_max_length(model, max_length: int) -> None:
+    """BEIR DPR enables truncation but may leave tokenizer.model_max_length unset."""
+    if not max_length or max_length <= 0:
+        return
+    for attr in ("q_tokenizer", "ctx_tokenizer", "tokenizer"):
+        tokenizer = getattr(model, attr, None)
+        if tokenizer is not None:
+            tokenizer.model_max_length = max_length
+    for attr in ("q_model", "ctx_model", "model"):
+        encoder = getattr(model, attr, None)
+        config = getattr(encoder, "config", None)
+        if config is not None:
+            config.max_position_embeddings = min(getattr(config, "max_position_embeddings", max_length), max_length)
+
+
 def _normalize_query_text(value):
     if value is None:
         return ""
@@ -369,8 +384,10 @@ if results is None:
         DPR = resolve_dpr_class()
         if DPR is None:
             raise ImportError("DPR is not available in current beir version. Try: pip install beir==1.0.1")
+        dpr_model = DPR((model_code_to_qmodel_name[args.model_code], model_code_to_cmodel_name[args.model_code]))
+        apply_tokenizer_max_length(dpr_model, args.max_length)
         model = DRES(
-            DPR((model_code_to_qmodel_name[args.model_code], model_code_to_cmodel_name[args.model_code])),
+            dpr_model,
             batch_size=args.per_gpu_batch_size,
             corpus_chunk_size=5000,
             show_progress_bar=args.show_progress,

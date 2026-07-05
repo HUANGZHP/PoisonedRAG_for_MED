@@ -10,7 +10,7 @@ from medrag_retriever import MedCPTRetriever
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Smoke test for MedRAG corpus + MedCPT retriever integration")
-    parser.add_argument("--base-dir", type=str, default="/home/huangzhp53/PoisonedRAG/datasets")
+    parser.add_argument("--base-dir", type=str, default="/home/Dataset/PoisonedRAG/datasets")
     parser.add_argument("--sources", type=str, default="textbooks", help="Comma-separated sources")
     parser.add_argument("--query", type=str, default="What is the function of the kidney?")
     parser.add_argument("--top-k", type=int, default=5)

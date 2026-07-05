@@ -89,14 +89,14 @@ model_code_to_cmodel_name = {
 
 # 预存本地 Index 路径，供检索器实例化时读取
 LOCAL_INDEX_PATHS = {
-    "pumbed_bm25": "/home/huangzhp53/PoisonedRAG/datasets/pubmed/index/bm25",
-    "pumbed_medcpt": "/home/huangzhp53/PoisonedRAG/datasets/pubmed/index/ncbi/MedCPT-Article-Encoder",
-    "pubmed_bm25": "/home/huangzhp53/PoisonedRAG/datasets/pubmed/index/bm25",
-    "pubmed_medcpt": "/home/huangzhp53/PoisonedRAG/datasets/pubmed/index/ncbi/MedCPT-Article-Encoder",
-    "statpearls_bm25": "/home/huangzhp53/PoisonedRAG/datasets/statpearls/index/bm25",
-    "statpearls_medcpt": "/home/huangzhp53/PoisonedRAG/datasets/statpearls/index/ncbi/MedCPT-Article-Encoder",
-    "textbooks_bm25": "/home/huangzhp53/PoisonedRAG/datasets/textbooks/index/bm25",
-    "textbooks_medcpt": "/home/huangzhp53/PoisonedRAG/datasets/textbooks/index/ncbi/MedCPT-Article-Encoder",
+    "pumbed_bm25": "/home/Dataset/PoisonedRAG/datasets/pubmed/index/bm25",
+    "pumbed_medcpt": "/home/Dataset/PoisonedRAG/datasets/pubmed/index/ncbi/MedCPT-Article-Encoder",
+    "pubmed_bm25": "/home/Dataset/PoisonedRAG/datasets/pubmed/index/bm25",
+    "pubmed_medcpt": "/home/Dataset/PoisonedRAG/datasets/pubmed/index/ncbi/MedCPT-Article-Encoder",
+    "statpearls_bm25": "/home/Dataset/PoisonedRAG/datasets/statpearls/index/bm25",
+    "statpearls_medcpt": "/home/Dataset/PoisonedRAG/datasets/statpearls/index/ncbi/MedCPT-Article-Encoder",
+    "textbooks_bm25": "/home/Dataset/PoisonedRAG/datasets/textbooks/index/bm25",
+    "textbooks_medcpt": "/home/Dataset/PoisonedRAG/datasets/textbooks/index/ncbi/MedCPT-Article-Encoder",
 }
 
 def contriever_get_emb(model, input):
