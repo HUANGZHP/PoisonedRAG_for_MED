@@ -8,9 +8,9 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from tqdm import tqdm
 
-DEFAULT_MEDRAG_DATA_DIR = "/home/huangzhp53/PoisonedRAG/datasets"
+DEFAULT_MEDRAG_DATA_DIR = "/home/Dataset/PoisonedRAG/datasets"
 DEFAULT_MEDRAG_ROOT = "/home/huangzhp53/MedRAG"
-DEFAULT_MEDRAG_DB_DIR = "/home/huangzhp53/PoisonedRAG/datasets"
+DEFAULT_MEDRAG_DB_DIR = "/home/Dataset/PoisonedRAG/datasets"
 
 # Apply project defaults only when users have not configured these variables.
 os.environ.setdefault("MEDRAG_DATA_DIR", DEFAULT_MEDRAG_DATA_DIR)
