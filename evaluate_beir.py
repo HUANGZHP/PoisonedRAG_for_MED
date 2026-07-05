@@ -43,7 +43,7 @@ parser.add_argument('--medcpt_query_encoder_path', type=str, default='', help='L
 parser.add_argument('--show-progress', action=argparse.BooleanOptionalAction, default=True, help='Show progress bars for corpus/query loops')
 parser.add_argument('--query', type=str, default='', help='Single query text used when dataset has no built-in queries')
 parser.add_argument('--queries-json', type=str, default='', help='Path to custom queries json when dataset has no built-in queries')
-parser.add_argument('--prefer-mirage-queries', action=argparse.BooleanOptionalAction, default=True, help='Prefer loading queries from MIRAGE/benchmark.json')
+parser.add_argument('--prefer-mirage-queries', action=argparse.BooleanOptionalAction, default=False, help='Prefer loading queries from MIRAGE/benchmark.json')
 parser.add_argument('--mirage-benchmark-path', type=str, default=os.path.join(os.getcwd(), 'MIRAGE', 'benchmark.json'), help='Path to MIRAGE benchmark.json')
 parser.add_argument('--mirage-dataset', type=str, default='auto', help='MIRAGE subset name (auto/pubmedqa/medqa/medmcqa/mmlu/bioasq/all)')
 
@@ -118,6 +118,32 @@ def _build_fallback_queries(args) -> Dict[str, str]:
         if queries:
             return queries
         raise ValueError(f"No valid queries found in --queries-json file: {query_json_path}")
+
+
+def apply_tokenizer_max_length(model, max_length: int) -> None:
+    """BEIR DPR enables truncation but may leave tokenizer.model_max_length unset."""
+    if not max_length or max_length <= 0:
+        return
+
+    target_models = [model]
+    wrapped_model = getattr(model, "model", None)
+    if wrapped_model is not None and wrapped_model is not model:
+        target_models.append(wrapped_model)
+
+    for target in target_models:
+        for attr in ("q_tokenizer", "ctx_tokenizer", "tokenizer"):
+            tokenizer = getattr(target, attr, None)
+            if tokenizer is not None:
+                tokenizer.model_max_length = max_length
+
+        for attr in ("q_model", "ctx_model", "model"):
+            encoder = getattr(target, attr, None)
+            config = getattr(encoder, "config", None)
+            if config is not None:
+                config.max_position_embeddings = min(
+                    getattr(config, "max_position_embeddings", max_length),
+                    max_length,
+                )
 
     raise FileNotFoundError(
         "Dataset has no built-in queries. Please provide --query \"...\" or --queries-json /path/to/queries.json."
@@ -375,6 +401,7 @@ if results is None:
             corpus_chunk_size=5000,
             show_progress_bar=args.show_progress,
         )
+        apply_tokenizer_max_length(model, args.max_length)
     elif args.model_code == 'ance':
         SentenceBERT = resolve_sentencebert_class()
         if SentenceBERT is None:

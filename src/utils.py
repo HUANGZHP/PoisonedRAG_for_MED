@@ -121,9 +121,9 @@ def ance_get_emb(model, input):
 
 def medcpt_get_emb(model, input):
     output = model(**input)
-    if hasattr(output, "pooler_output") and output.pooler_output is not None:
-        return output.pooler_output
-    # Fallback for models without pooler: use [CLS] token representation.
+    # MedCPT: use CLS token (last_hidden_state[:,0]) which matches the FAISS index
+    # and the MedCPTRetriever._encode_query behavior. Pooler_output is a different
+    # representation (CLS + dense + tanh) and produces incompatible score scales.
     return output.last_hidden_state[:, 0]
 
 

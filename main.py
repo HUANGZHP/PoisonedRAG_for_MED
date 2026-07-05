@@ -492,7 +492,7 @@ def main():
                                 adv_sim = torch.mm(adv_emb, query_emb.T).cpu().item()
                             elif args.score_function == 'cos_sim':
                                 adv_sim = torch.cosine_similarity(adv_emb, query_emb).cpu().item()
-                            
+
                             topk_results.append({'score': adv_sim, 'context': adv_text_list[j]})
 
                     topk_results = sorted(topk_results, key=lambda x: float(x['score']), reverse=True)
