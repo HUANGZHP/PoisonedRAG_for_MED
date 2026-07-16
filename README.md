@@ -429,9 +429,9 @@ python -u agentic_main.py \
 | blackbox (LM_targeted) | ~0.89 | 0.78 | 黑盒攻击 + 裁判防御 |
 | whitebox (hotflip) | ~0.88 | 0.95 | 纯白盒攻击，无裁判 |
 
-### 3.6 微调医学对抗鲁棒检索器 `contriever_v1`
+### 3.6 微调医学对抗鲁棒检索器 `contriever_v1` / `contriever_v2`
 
-`contriever_stage1/` 在官方 `facebook/contriever` 权重上继续训练，不改变模型结构、Mean Pooling 或 L2 Normalize。它将同一 Query 的两类攻击负例严格合并为一个训练样本：
+`contriever_v1` 在官方 `facebook/contriever` 上以 PubMedQA 训练；`contriever_v2` 以 v1 为初始化继续使用 MedQA 训练。二者均不改变模型结构、Mean Pooling 或 L2 Normalize，并将同一 Query 的两类攻击负例严格合并为一个训练样本：
 
 ```
 {query, positive, blackbox_negative, hotflip_negative}
@@ -484,34 +484,35 @@ CUDA_VISIBLE_DEVICES=0 python -m contriever_stage1.train \
 
 #### 使用微调后的检索器
 
-`contriever_v1` 默认查找 `checkpoint/contriever_v1/best_model`。若模型存放在其他位置，先显式指定路径：
+`contriever_v1` 与 `contriever_v2` 默认分别查找 `checkpoint/contriever_v1/best_model`、`checkpoint/contriever_v2/best_model`。若模型存放在其他位置，先显式指定路径：
 
 ```bash
 export CONTRIEVER_V1_PATH=/absolute/path/to/checkpoint/contriever_v1/best_model
+export CONTRIEVER_V2_PATH=/absolute/path/to/checkpoint/contriever_v2/best_model
 ```
 
 先用该权重生成检索结果：
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 python -u evaluate_beir.py \
-  --model_code contriever_v1 \
+  --model_code contriever_v2 \
   --dataset pubmed --split test --top_k 100 \
   --queries-json results/adv_targeted_results/mirage_pubmedqa_all.queries.json \
-  --result_output results/beir_results/mirage_pubmedqa_all-contriever_v1.json
+  --result_output results/beir_results/mirage_pubmedqa_all-contriever_v2.json
 ```
 
 随后可与任意攻击模式一起评测：
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 python -u main.py \
-  --eval_model_code contriever_v1 --eval_dataset pubmed \
+  --eval_model_code contriever_v2 --eval_dataset pubmed \
   --model_name gpt4.1mini --judge_model_name None --top_k 5 \
   --attack_method hotflip --adv_source json \
   --adv_json_path results/adv_targeted_results/mirage_pubmedqa_all.json \
   --target_ids_path results/adv_targeted_results/mirage_pubmedqa_all.ids \
-  --retrieval_results_path results/beir_results/mirage_pubmedqa_all-contriever_v1.json \
+  --retrieval_results_path results/beir_results/mirage_pubmedqa_all-contriever_v2.json \
   --adv_per_query 5 --M 500 --repeat_times 1 \
-  --name pubmed_contriever_v1_gpt41mini_hotflip
+  --name pubmed_contriever_v2_gpt41mini_hotflip
 ```
 
 ## 4. 查看运行结果

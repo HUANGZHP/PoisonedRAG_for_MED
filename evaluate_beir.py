@@ -20,7 +20,7 @@ from medrag_retriever import MedCPTRetriever
 import argparse
 parser = argparse.ArgumentParser(description='test')
 
-parser.add_argument('--model_code', type=str, default="contriever", choices=["contriever", "contriever_v1", "contriever-msmarco", "contriever-chinese", "dpr", "ance", "bm25", "medcpt"])
+parser.add_argument('--model_code', type=str, default="contriever", choices=["contriever", "contriever_v1", "contriever_v2", "contriever-msmarco", "contriever-chinese", "dpr", "ance", "bm25", "medcpt"])
 parser.add_argument('--score_function', type=str, default='dot', choices=['dot', 'cos_sim'])
 parser.add_argument('--top_k', type=int, default=100)
 parser.add_argument(
@@ -382,7 +382,7 @@ elif args.model_code == "bm25":
 
 if results is None:
     logging.info("Loading BEIR retriever model...")
-    if args.model_code in ('contriever', 'contriever_v1', 'contriever-msmarco', 'contriever-chinese'):
+    if args.model_code in ('contriever', 'contriever_v1', 'contriever_v2', 'contriever-msmarco', 'contriever-chinese'):
         encoder = Contriever.from_pretrained(model_code_to_cmodel_name[args.model_code])
         encoder = encoder.to(device)
         tokenizer = transformers.BertTokenizerFast.from_pretrained(model_code_to_cmodel_name[args.model_code])
