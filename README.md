@@ -263,6 +263,79 @@ python -u gen_mirage_queries.py --dataset pubmedqa --limit 60 \
 
 产物：`*.json`（对抗文本标签）/ `*.ids`（query id）/ `*.queries.json`（检索用）
 
+### 3.1.1 生成 Contriever 偏好微调数据
+
+`scripts/` 提供两类针对检索器投毒攻击的负例生成代码。仅使用：
+
+- PubMedQA 的人工标注 PQA-L：`official_pqal/ori_pqal.json`；
+- MedQA 的 USMLE 全部训练集：`MedQA-USMLE/.../phrases_no_exclude_train.jsonl`。
+
+先下载数据仓库，并配置 OpenAI 兼容 API。API key 不应写入或提交到配置文件；`scripts/llm_utils.py` 会优先读取环境变量，并从 `model_configs/gpt4.1mini_config.json` 获取模型名与默认 base URL。
+
+```bash
+git clone https://github.com/HUANGZHP/PubMedQA-and-MedQA.git /path/to/PubMedQA-and-MedQA
+
+export OPENAI_API_KEY="<your_api_key>"
+# 仅在不使用 model_configs/gpt4.1mini_config.json 中的 base_url 时设置：
+export OPENAI_BASE_URL="https://<your-openai-compatible-endpoint>/v1"
+
+DATA_ROOT=/path/to/PubMedQA-and-MedQA
+PQA_L="$DATA_ROOT/datasets/PubMedQA/official_pqal/ori_pqal.json"
+MEDQA_USMLE="$DATA_ROOT/datasets/MedQA-USMLE/data_clean/questions/US/4_options/phrases_no_exclude_train.jsonl"
+```
+
+生成语义保持固定：LLM 只根据 `query` 与正确 `positive` 生成误导后缀 `I`；Black-box negative 为 `query + I`；HotFlip 使用**同一份 I**，仅以 Contriever 梯度优化负例中的前缀 `S`。输入 query 与 positive 不会被攻击过程改写。
+
+#### PubMedQA（PQA-L）
+
+```bash
+# 先生成 Black-box：每个 query 对应一个 query + I 负例
+python -u scripts/build_blackbox.py \
+  --input "$PQA_L" \
+  --output processed/pubmedqa_blackbox.jsonl \
+  --dataset pubmedqa --verbose
+
+# 再使用同一 I 生成 HotFlip 负例。这里将物理 GPU 1 映射为进程内 GPU 0。
+CUDA_VISIBLE_DEVICES=1 python -u scripts/build_hotflip.py \
+  --input "$PQA_L" \
+  --blackbox-input processed/pubmedqa_blackbox.jsonl \
+  --output processed/pubmedqa_hotflip.jsonl \
+  --dataset pubmedqa --gpu 0 --verbose
+
+python scripts/validate_training_data.py \
+  --source "$PQA_L" \
+  --blackbox processed/pubmedqa_blackbox.jsonl \
+  --hotflip processed/pubmedqa_hotflip.jsonl \
+  --dataset pubmedqa
+```
+
+#### MedQA（USMLE train）
+
+```bash
+python -u scripts/build_blackbox.py \
+  --input "$MEDQA_USMLE" \
+  --output processed/medqa_blackbox.jsonl \
+  --dataset medqa --verbose
+
+CUDA_VISIBLE_DEVICES=1 python -u scripts/build_hotflip.py \
+  --input "$MEDQA_USMLE" \
+  --blackbox-input processed/medqa_blackbox.jsonl \
+  --output processed/medqa_hotflip.jsonl \
+  --dataset medqa --gpu 0 --verbose
+
+python scripts/validate_training_data.py \
+  --source "$MEDQA_USMLE" \
+  --blackbox processed/medqa_blackbox.jsonl \
+  --hotflip processed/medqa_hotflip.jsonl \
+  --dataset medqa
+```
+
+校验脚本会检查四个字段是否准确、来源是否为 USMLE（MedQA）、空文本、`positive == negative`、重复样本、两攻击文件的 query/positive 对齐，以及两类 negative 是否不同。成功后输出 `checks: passed`。最终文件均为 JSONL，每条记录格式为：
+
+```json
+{"query": "...", "positive": "...", "negative": "...", "attack_type": "blackbox"}
+```
+
 ### 3.2 生成检索结果
 
 ```bash
@@ -542,4 +615,3 @@ grep -aE "Namespace|Using|Doing|ASR Mean|F1 mean|Ending" logs/user_runs_logs/*.o
 | 检索结果 | `results/beir_results/` | `.json` |
 | 评测结果（逐 query 详情） | `results/query_results/<dir>/<name>.json` | `.json` |
 | 运行日志 | `logs/user_runs_logs/<name>.out` | 文本 |
-
