@@ -398,6 +398,91 @@ python -u agentic_main.py \
 | blackbox (LM_targeted) | ~0.89 | 0.78 | 黑盒攻击 + 裁判防御 |
 | whitebox (hotflip) | ~0.88 | 0.95 | 纯白盒攻击，无裁判 |
 
+### 3.6 微调医学对抗鲁棒检索器 `contriever_v1`
+
+`contriever_stage1/` 在官方 `facebook/contriever` 权重上继续训练，不改变模型结构、Mean Pooling 或 L2 Normalize。它将同一 Query 的两类攻击负例严格合并为一个训练样本：
+
+```
+{query, positive, blackbox_negative, hotflip_negative}
+```
+
+训练使用 Multiple-Negatives InfoNCE（temperature=0.05）：每个 Query 的正例为 `positive`，候选负例同时包含本条样本的 Black-box / HotFlip negative，以及 batch 内其余样本的正例和负例。因此不要把两个 JSONL 当作独立数据集训练。
+
+#### 训练数据要求
+
+仅传入下列两份 JSONL。每行都必须是 `query`、`positive`、`negative`、`attack_type` 四个字段；两份文件的 Query 与 positive 必须一一对应。
+
+```
+processed/pubmedqa_blackbox.jsonl  # attack_type 为 blackbox
+processed/pubmedqa_hotflip.jsonl   # attack_type 为 hotflip
+```
+
+训练启动前会自动拒绝空文本、`positive == negative`、重复 Query、攻击类型错误、缺失配对，以及两文件 positive 不一致的情况。
+
+#### 运行微调
+
+```bash
+conda activate PoisonedRAG
+
+# 若本地已缓存 facebook/contriever，可把 --local-model-path 改为该目录；
+# 未提供时会从 HuggingFace 的 facebook/contriever 加载。
+CUDA_VISIBLE_DEVICES=0 python -m contriever_stage1.train \
+  --blackbox-path processed/pubmedqa_blackbox.jsonl \
+  --hotflip-path processed/pubmedqa_hotflip.jsonl \
+  --model-name facebook/contriever \
+  --output-dir checkpoint/contriever_v1 \
+  --epochs 5 \
+  --batch-size 16 \
+  --max-length 512 \
+  --learning-rate 2e-5 \
+  --weight-decay 0.01 \
+  --temperature 0.05 \
+  --gradient-clip 1.0 \
+  --mixed-precision
+```
+
+可选地使用本地模型缓存：
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python -m contriever_stage1.train \
+  --local-model-path /path/to/facebook/contriever \
+  --output-dir checkpoint/contriever_v1
+```
+
+每个 epoch 都会记录训练损失、正例/两类负例的平均相似度、两种 gap、`Positive > Negative` 准确率，并保存 `checkpoint/contriever_v1/epoch*/`。`best_model/` 由验证损失、平均 gap 和两种准确率共同决定。`final_evaluation.json` 给出微调前后在固定随机抽取 100 条训练样本上的对比；它用于训练过程诊断，不应视为独立测试集结果。
+
+#### 使用微调后的检索器
+
+`contriever_v1` 默认查找 `checkpoint/contriever_v1/best_model`。若模型存放在其他位置，先显式指定路径：
+
+```bash
+export CONTRIEVER_V1_PATH=/absolute/path/to/checkpoint/contriever_v1/best_model
+```
+
+先用该权重生成检索结果：
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python -u evaluate_beir.py \
+  --model_code contriever_v1 \
+  --dataset pubmed --split test --top_k 100 \
+  --queries-json results/adv_targeted_results/mirage_pubmedqa_all.queries.json \
+  --result_output results/beir_results/mirage_pubmedqa_all-contriever_v1.json
+```
+
+随后可与任意攻击模式一起评测：
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python -u main.py \
+  --eval_model_code contriever_v1 --eval_dataset pubmed \
+  --model_name gpt4.1mini --judge_model_name None --top_k 5 \
+  --attack_method hotflip --adv_source json \
+  --adv_json_path results/adv_targeted_results/mirage_pubmedqa_all.json \
+  --target_ids_path results/adv_targeted_results/mirage_pubmedqa_all.ids \
+  --retrieval_results_path results/beir_results/mirage_pubmedqa_all-contriever_v1.json \
+  --adv_per_query 5 --M 500 --repeat_times 1 \
+  --name pubmed_contriever_v1_gpt41mini_hotflip
+```
+
 ## 4. 查看运行结果
 
 运行日志输出至 `logs/user_runs_logs/<name>.out`，最终结果示例：
@@ -457,5 +542,4 @@ grep -aE "Namespace|Using|Doing|ASR Mean|F1 mean|Ending" logs/user_runs_logs/*.o
 | 检索结果 | `results/beir_results/` | `.json` |
 | 评测结果（逐 query 详情） | `results/query_results/<dir>/<name>.json` | `.json` |
 | 运行日志 | `logs/user_runs_logs/<name>.out` | 文本 |
-
 

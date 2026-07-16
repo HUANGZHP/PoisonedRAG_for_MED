@@ -48,12 +48,18 @@ def _pick_existing_path(*candidates: str) -> Optional[str]:
 
 
 HF_MODEL_ROOT = os.environ.get("HF_MODEL_ROOT", "/home/HF_Model")
+REPO_ROOT = Path(__file__).resolve().parents[1]
+CONTRIEVER_V1_PATH = os.environ.get(
+    "CONTRIEVER_V1_PATH",
+    str(REPO_ROOT / "checkpoint" / "contriever_v1" / "best_model"),
+)
 
 model_code_to_qmodel_name = {
     "contriever": _pick_existing_path(
         os.path.join(HF_MODEL_ROOT, "facebook", "contriever"),
         os.path.join(HF_MODEL_ROOT, "contriever"),
     ) or "facebook/contriever",
+    "contriever_v1": CONTRIEVER_V1_PATH,
     "contriever-msmarco": _pick_existing_path(
         os.path.join(HF_MODEL_ROOT, "facebook", "contriever-msmarco"),
         os.path.join(HF_MODEL_ROOT, "contriever-msmarco"),
@@ -76,6 +82,7 @@ model_code_to_qmodel_name = {
 
 model_code_to_cmodel_name = {
     "contriever": model_code_to_qmodel_name["contriever"],
+    "contriever_v1": model_code_to_qmodel_name["contriever_v1"],
     "contriever-msmarco": model_code_to_qmodel_name["contriever-msmarco"],
     "contriever-chinese": model_code_to_qmodel_name["contriever-chinese"],
     "ance": model_code_to_qmodel_name["ance"],
