@@ -164,7 +164,7 @@ def parse_args():
 
     # Retriever and BEIR datasets
     parser.add_argument('--gpu_ids', type=str, default='', help='Comma-separated GPU ids for multi-GPU poisoning, e.g. 0,1,2')
-    parser.add_argument("--eval_model_code", type=str, default="contriever", choices=["contriever", "contriever-msmarco", "contriever-chinese", "ance", "dpr", "medcpt", "bm25"])
+    parser.add_argument("--eval_model_code", type=str, default="contriever", choices=["contriever", "contriever_v1", "contriever_v2", "contriever-msmarco", "contriever-chinese", "ance", "dpr", "medcpt", "bm25"])
     parser.add_argument('--eval_dataset', type=str, default="nq", choices=["nq", "hotpotqa", "msmarco", "pubmed", "statpearls", "textbooks", "csco_colorectal_2026"], help='Dataset to evaluate (BEIR or MedRAG corpus)')
     parser.add_argument('--split', type=str, default='test')
     parser.add_argument("--query_results_dir", type=str, default='main')
