@@ -59,8 +59,6 @@ def validate_one(
 
 def validate(source: Path, blackbox: Path, hotflip: Path, dataset: str) -> None:
     """校验源数据、两份攻击数据及其逐条配对关系。"""
-    if dataset == "pubmedqa" and (source.name != "ori_pqal.json" or "official_pqal" not in str(source)):
-        raise ValueError("PubMedQA 源路径不是 PQA-L 的 official_pqal/ori_pqal.json")
     if dataset == "medqa" and "MedQA-USMLE" not in str(source):
         raise ValueError("MedQA 源路径不是 USMLE 数据集")
     source_rows = load_medqa(str(source)) if dataset == "medqa" else load_pubmedqa(str(source))
@@ -86,7 +84,7 @@ def validate(source: Path, blackbox: Path, hotflip: Path, dataset: str) -> None:
                 "original_samples": len(source_rows),
                 "blackbox_samples": len(blackbox_map),
                 "hotflip_samples": len(hotflip_map),
-                "source": "USMLE train only" if dataset == "medqa" else "PQA-L only",
+                "source": "USMLE train only" if dataset == "medqa" else "PubMedQA",
                 "checks": "passed",
             },
             ensure_ascii=False,

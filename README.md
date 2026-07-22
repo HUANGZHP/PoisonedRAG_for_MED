@@ -70,6 +70,11 @@ datasets/pubmed/
 代码通过 `--eval_model_code` 选择检索器，支持以下选项：
 - **medcpt**: 医学专用稠密检索（推荐，需手动下载模型和索引）
 - **contriever**: 通用稠密检索（自动从 HuggingFace 加载）
+- **contriever_v1**: 以 PubMedQA 微调的 Contriever
+- **contriever_v2**: 以 v1 为初始化、再以 MedQA 微调的 Contriever
+- **contriever_v3**: PubMedQA 与 MedQA 1:1 replay 微调版
+- **contriever_v4**: PQA-U 与 MedQA 1:1 微调版
+- **contriever_v5**: 仅以 MedQA 训练的微调版
 - **contriever-msmarco**: MS MARCO 微调版 Contriever
 - **contriever-chinese**: 中文场景优化的 Contriever
 - **ance**: Approximate Nearest Neighbor Negative Contrastive Estimation
@@ -113,6 +118,8 @@ from src.utils import load_models
 model, c_model, tokenizer, get_emb = load_models('contriever')
 "
 ```
+
+微调版本默认加载 `checkpoint/contriever_v1/best_model` 或 `checkpoint/contriever_v2/best_model`；也可分别用 `CONTRIEVER_V1_PATH`、`CONTRIEVER_V2_PATH` 指定其他路径。
 
 #### 2.4.3 BM25（依赖 pyserini）
 
@@ -298,7 +305,7 @@ python scripts/validate_training_data.py --source "$MEDQA_USMLE" --blackbox proc
 
 ```bash
 python -u evaluate_beir.py \
-  --model_code <medcpt|contriever|dpr|ance|bm25> \
+  --model_code <medcpt|contriever|contriever_v1|contriever_v2|contriever_v3|contriever_v4|contriever_v5|dpr|ance|bm25> \
   --dataset <pubmed|statpearls|textbooks|hotpotqa|nq|msmarco> \
   --split test --top_k 100 \
   --queries-json <path/to/queries.json> \
@@ -319,115 +326,84 @@ python gen_adv_for_mcq.py \
   --mirage_dataset medqa --concurrency 10
 ```
 
-### 3.4 运行评测
+### 3.4 实验方法
 
-`agentic_main.py` 兼容 `main.py` 全部参数，额外支持 Agentic RAG / 裁判 / RiD 防御。
+每个 query 的评测过程如下：先读取预生成的检索结果和对抗文本，将对抗文本按检索分数与正常文档混排；随后执行可选防御，最后由生成模型回答。实验不在运行时重新生成攻击文本。
 
-```bash
-# 无攻击
-python -u agentic_main.py \
-  --eval_model_code <retriever> --eval_dataset <corpus> \
-  --model_name <llm> --top_k 5 --attack_method None \
-  --agentic_rag --rag_max_turns 3 \
-  --retrieval_results_path <retrieval.json> --name <run_name>
-
-# 黑盒攻击 + 裁判
-python -u agentic_main.py \
-  --eval_model_code <retriever> --eval_dataset <corpus> \
-  --model_name <llm> --judge_model_name <judge_llm> --top_k 5 \
-  --attack_method LM_targeted --agentic_rag --rag_max_turns 3 \
-  --adv_source json --adv_json_path <adv.json> --target_ids_path <ids.txt> \
-  --retrieval_results_path <retrieval.json> \
-  --adv_per_query 5 --M <N> --name <run_name>
-
-# 白盒攻击（无裁判）
-python -u agentic_main.py \
-  --eval_model_code <retriever> --eval_dataset <corpus> \
-  --model_name <llm> --judge_model_name None --top_k 5 \
-  --attack_method hotflip --agentic_rag --rag_max_turns 3 \
-  --adv_source json --adv_json_path <adv.json> --target_ids_path <ids.txt> \
-  --retrieval_results_path <retrieval.json> \
-  --adv_per_query 5 --M <N> --name <run_name>
+```text
+Query + 预生成检索结果 + 预生成攻击文本
+                    ↓
+            按分数混排候选文档
+                    ↓
+  TrustRAG / 医学语义聚类 / Judge / RiD（可选）
+                    ↓
+            Agentic 或普通 RAG 生成
+                    ↓
+             严格 ASR 与检索 F1
 ```
 
-关键参数：
+攻击方法：
 
-| 参数 | 说明 |
-|------|------|
-| `--attack_method` | `None` / `LM_targeted` / `hotflip` |
-| `--judge_model_name` | 裁判 LLM 名称，`None` 关闭 |
-| `--agentic_rag` | 启用搜索-推理循环 |
-| `--rid_defense` | 启用严格相关性过滤 |
-| `--rag_max_turns` | 最大搜索轮次（默认 3） |
-| `--M` | 每轮评测 query 数 |
-| `--repeat_times` | 重复轮数（最终 ASR 取均值） |
+| 方法 | 配置值 | 实验含义 |
+|------|------|------|
+| 无攻击 | `attack_method=None` | 不注入恶意文本，用于正常能力基线。 |
+| 黑盒 | `attack_method="LM_targeted"` | 注入 LLM 生成的、面向目标 query 的恶意上下文。 |
+| 白盒 | `attack_method="hotflip"` | 使用与黑盒相同的恶意主体文本，并通过 HotFlip 优化前缀，使其更容易被目标检索器召回。 |
 
-> 如需指定 GPU：`CUDA_VISIBLE_DEVICES=<gpu_id> python -u agentic_main.py ...`，或通过 `--gpu_id` 参数。
+防御方法：
 
-### 3.5 复现实验（Qwen3-8B + PubMed + PubMedQA + Contriever）
+| 组件 | 开关 | 作用与边界 |
+|------|------|------|
+| Judge | `judge_model_name` | 识别乱码、提示注入、答非所问等可疑上下文。Agentic 模式下先过滤初始 top-k，并在每次实际搜索时再次过滤。 |
+| Agentic RAG | `agentic_rag=True` | 多轮“生成搜索意图 → 注入候选证据 → 继续推理”。当前复用同一批 top-k 候选，不重新查询全库。 |
+| Reason-in-Docs | `reason_in_docs=True` | 逐篇提取与问题有关的信息，降低长上下文噪声；本身不是恶意过滤。 |
+| RiD 严格模式 | `rid_defense=True` | 仅在 `reason_in_docs=True` 时生效；额外删除无关、误导或证据不足文档，可能同时误删有效医学证据。 |
+| TrustRAG | `trustrag_filter=True` | 固定执行 ROUGE-L 近重复门控、KMeans 聚类过滤，以及内部知识/冲突消解/最终回答三阶段。 |
+| 医学语义聚类 | `medical_semantic_clustering=True` | 用 MedCPT Article Encoder 对候选医学文档聚类，额外过滤高凝聚的可疑模板簇；可与 TrustRAG 叠加。 |
+
+### 3.5 集中配置运行
+
+**所有评测、攻击与防御变量均在 [`experiment_config.py`](experiment_config.py) 中统一设置。** 每个字段已有中文注释、可选值和常用范围；不再需要编写多行命令。
+
+完成配置编辑后，唯一的启动命令是：
 
 ```bash
-conda activate PoisonedRAG
-
-# === noattack（基线，无攻击无裁判） ===
-python -u agentic_main.py \
-  --eval_model_code contriever \       # 检索器
-  --eval_dataset pubmed \              # 语料库
-  --model_name qwen3_8b \              # 生成模型
-  --top_k 5 \                          # 检索 top-K
-  --attack_method None \               # 不攻击
-  --agentic_rag --rag_max_turns 3 \    # Agentic RAG 多轮搜索
-  --adv_source json \
-  --adv_json_path results/adv_targeted_results/mirage_pubmedqa_all.json \
-  --target_ids_path results/adv_targeted_results/mirage_pubmedqa_all.ids \
-  --retrieval_results_path results/beir_results/mirage_pubmedqa_all-contriever.json \
-  --adv_per_query 5 \                  # 每 query 对抗文本数
-  --M 500 \                            # 每轮 query 数
-  --repeat_times 10 \                  # 重复轮数
-  --name pubmed_qwen3_noattack         # 运行名称
-
-# === blackbox（黑盒攻击 + 裁判防御） ===
-python -u agentic_main.py \
-  --eval_model_code contriever \
-  --eval_dataset pubmed \
-  --model_name qwen3_8b \
-  --judge_model_name qwen3_8b \        # 裁判模型（与生成同一模型）
-  --top_k 5 \
-  --attack_method LM_targeted \        # 黑盒攻击
-  --agentic_rag --rag_max_turns 3 \
-  --adv_source json \
-  --adv_json_path results/adv_targeted_results/mirage_pubmedqa_all.json \
-  --target_ids_path results/adv_targeted_results/mirage_pubmedqa_all.ids \
-  --retrieval_results_path results/beir_results/mirage_pubmedqa_all-contriever.json \
-  --adv_per_query 5 --M 500 --repeat_times 10 \
-  --name pubmed_qwen3_blackbox
-
-# === whitebox（纯白盒攻击，无裁判） ===
-python -u agentic_main.py \
-  --eval_model_code contriever \
-  --eval_dataset pubmed \
-  --model_name qwen3_8b \
-  --judge_model_name None \            # 关闭裁判
-  --top_k 5 \
-  --attack_method hotflip \            # 白盒梯度攻击
-  --agentic_rag --rag_max_turns 3 \
-  --adv_source json \
-  --adv_json_path results/adv_targeted_results/mirage_pubmedqa_all.json \
-  --target_ids_path results/adv_targeted_results/mirage_pubmedqa_all.ids \
-  --retrieval_results_path results/beir_results/mirage_pubmedqa_all-contriever.json \
-  --adv_per_query 5 --M 500 --repeat_times 10 \
-  --name pubmed_qwen3_whitebox
+python run_experiment_from_config.py
 ```
 
-> 后台运行加 `nohup ... > log.out 2>&1 &`。GPU 指定：`CUDA_VISIBLE_DEVICES=<id>` 或 `--gpu_id <id>`。
+配置字段按以下几组组织：
 
-预期结果：
+| 配置组 | 代表字段 | 用途 |
+|------|------|------|
+| 运行入口 | `entrypoint` | `"agentic"` 或 `"standard"`。 |
+| 检索 | `eval_model_code`、`eval_dataset`、`retrieval_results_path`、`top_k`、`gpu_id` | 选择模型、语料、检索文件和 GPU。 |
+| 攻击与规模 | `attack_method`、`adv_json_path`、`target_ids_path`、`M`、`repeat_times` | 选择攻击、评测 query 和重复轮数。 |
+| LLM 与 Judge | `model_name`、`judge_model_name` | 选择回答模型与恶意文本裁判；Judge 写 `"None"` 即关闭。 |
+| Agentic / RiD | `agentic_rag`、`reason_in_docs`、`rid_defense`、`rag_max_turns` | 控制多轮推理与逐篇文档处理。 |
+| 聚类防御 | `trustrag_filter`、`medical_semantic_clustering` 及其路径/阈值 | 选择 TrustRAG 和医学语义聚类。 |
 
-| 实验 | ASR | F1 | 说明 |
-|------|:---:|:---:|------|
-| noattack | ~0.25 | N/A | 基线错误率 |
-| blackbox (LM_targeted) | ~0.89 | 0.78 | 黑盒攻击 + 裁判防御 |
-| whitebox (hotflip) | ~0.88 | 0.95 | 纯白盒攻击，无裁判 |
+为确保不同实验可直接比较，以下设置已在程序中固定，不在配置文件暴露：对抗文本始终从预生成 JSON 读取、ASR 始终使用严格匹配、标注真值上下文始终关闭。
+
+常用配置组合：
+
+```python
+# 无防御基线
+"judge_model_name": "None",
+"agentic_rag": False,
+"reason_in_docs": False,
+"trustrag_filter": False,
+"medical_semantic_clustering": False,
+
+# Agentic + Judge，未启用 RiD
+"judge_model_name": "gpt4.1mini",
+"agentic_rag": True,
+"reason_in_docs": False,
+"rid_defense": False,
+
+# TrustRAG + 医学语义聚类
+"trustrag_filter": True,
+"medical_semantic_clustering": True,
+```
 
 ### 3.6 微调医学对抗鲁棒检索器 `contriever_v1` / `contriever_v2`
 

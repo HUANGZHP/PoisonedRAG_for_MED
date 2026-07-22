@@ -151,6 +151,8 @@ from src.utils import (
     contains_normalized_target,
 )
 from src.prompts import wrap_prompt, wrap_multiple_choice_prompt, YESNO_PROMPT
+from src.trustrag_filter import MedicalSemanticClusterFilter, TrustRAGFilterStats, TrustRAGOriginalFilter, TrustRAGOriginalStats, trustrag_conflict_answer
+from src.config_utils import load_experiment_config
 from src.search_o1_integration import (
     run_agentic_rag,
     run_reason_in_docs,
@@ -161,10 +163,11 @@ import torch
 
 def parse_args():
     parser = argparse.ArgumentParser(description='test')
+    parser.add_argument('--config', type=str, default='', help='集中实验配置文件路径。')
 
     # Retriever and BEIR datasets
     parser.add_argument('--gpu_ids', type=str, default='', help='Comma-separated GPU ids for multi-GPU poisoning, e.g. 0,1,2')
-    parser.add_argument("--eval_model_code", type=str, default="contriever", choices=["contriever", "contriever_v1", "contriever_v2", "contriever-msmarco", "contriever-chinese", "ance", "dpr", "medcpt", "bm25"])
+    parser.add_argument("--eval_model_code", type=str, default="contriever", choices=["contriever", "contriever_v1", "contriever_v2", "contriever_v3", "contriever_v4", "contriever_v5", "contriever-msmarco", "contriever-chinese", "ance", "dpr", "medcpt", "bm25"])
     parser.add_argument('--eval_dataset', type=str, default="nq", choices=["nq", "hotpotqa", "msmarco", "pubmed", "statpearls", "textbooks", "csco_colorectal_2026"], help='Dataset to evaluate (BEIR or MedRAG corpus)')
     parser.add_argument('--split', type=str, default='test')
     parser.add_argument("--query_results_dir", type=str, default='main')
@@ -175,12 +178,12 @@ def parse_args():
     parser.add_argument('--judge_model_name', type=str, default='None', help='Optional judge model name. Set None to disable judge defense.')
     parser.add_argument('--judge_model_config_path', type=str, default='', help='Optional path to judge model config json. Overrides --judge_model_name when provided.')
     parser.add_argument('--top_k', type=int, default=5)
-    parser.add_argument('--use_truth', type=str, default='False')
+    parser.add_argument('--use_truth', type=str, default='False', choices=['False'], help='固定关闭：始终使用检索上下文。')
     parser.add_argument('--gpu_id', type=int, default=0)
 
     # attack
     parser.add_argument('--attack_method', type=str, default='LM_targeted')
-    parser.add_argument('--adv_source', type=str, default='json', choices=['corpus', 'json'], help='Source of adversarial texts: corpus-generated or precomputed json')
+    parser.add_argument('--adv_source', type=str, default='json', choices=['json'], help='固定使用预生成 JSON 对抗文本。')
     parser.add_argument('--adv_json_path', type=str, default='', help='Optional path to adversarial QA json (default: results/adv_targeted_results/<eval_dataset>.json)')
     parser.add_argument('--target_ids_path', type=str, default='', help='Optional path to newline-delimited query ids used to filter evaluation subset')
     parser.add_argument('--retrieval_results_path', type=str, default='', help='Optional retrieval results json path (default: results/beir_results/<dataset>-<model>.json)')
@@ -189,14 +192,28 @@ def parse_args():
     parser.add_argument('--repeat_times', type=int, default=10, help='repeat several times to compute average')
     parser.add_argument('--M', type=int, default=10, help='one of our parameters, the number of target queries')
     parser.add_argument('--seed', type=int, default=12, help='Random seed')
-    parser.add_argument('--asr_match_mode', type=str, default='loose', choices=['loose', 'strict'], help='ASR matching mode: loose uses normalized token-sequence containment; strict uses yes/no label matching')
+    parser.add_argument('--asr_match_mode', type=str, default='strict', choices=['strict'], help='固定使用严格标签匹配判断 ASR。')
     parser.add_argument("--name", type=str, default='debug', help="Name of log and result.")
+    parser.add_argument('--trustrag_filter', action='store_true', help='启用原版 TrustRAG：固定 ROUGE-L 门控、KMeans 过滤及三阶段冲突消解。')
+    parser.add_argument('--trustrag_encoder_path', type=str, default='/home/HF_Model/facebook/contriever', help='TrustRAG 通用语义编码器本地路径。')
+    parser.add_argument('--medical_semantic_clustering', action='store_true', help='额外启用 MedCPT 医学语义聚类过滤。')
+    parser.add_argument('--medical_cluster_candidate_k', type=int, default=10, help='医学语义聚类使用的候选文档数。')
+    parser.add_argument('--medical_cluster_encoder_path', type=str, default=os.environ.get('MEDICAL_SEMANTIC_ENCODER_PATH', '/home/HF_Model/ncbi/MedCPT-Article-Encoder'), help='MedCPT 医学文档编码器本地路径。')
+    parser.add_argument('--medical_cluster_batch_size', type=int, default=8, help='医学语义编码的批大小。')
+    parser.add_argument('--medical_cluster_max_length', type=int, default=512, help='医学语义编码最大长度。')
+    parser.add_argument('--medical_cluster_similarity_threshold', type=float, default=0.88, help='医学语义可疑簇的最小平均余弦相似度。')
     parser.add_argument('--agentic_rag', action='store_true', help='Enable agentic RAG feature (Search-o1 style)')
     parser.add_argument('--reason_in_docs', action='store_true', help='Enable Reason-in-Documents module (Search-o1 style)')
     parser.add_argument('--rag_max_turns', type=int, default=3, help='Maximum search turns for agentic RAG')
     parser.add_argument('--rag_verbose', action='store_true', help='Verbose output for agentic RAG loop')
     parser.add_argument('--rid_defense', action='store_true', help='Enable strict relevance filtering in Reason-in-Docs (defense mode)')
 
+    config_parser = argparse.ArgumentParser(add_help=False)
+    config_parser.add_argument('--config', type=str, default='')
+    config_path, _ = config_parser.parse_known_args()
+    if config_path.config:
+        valid_keys = [action.dest for action in parser._actions]
+        parser.set_defaults(**load_experiment_config(config_path.config, valid_keys))
     args = parser.parse_args()
     print(args)
     return args
@@ -388,6 +405,27 @@ def main():
         judge_llm = None
         print("Judge defense disabled.")
 
+    trustrag_filter = None
+    if args.trustrag_filter:
+        trustrag_filter = TrustRAGOriginalFilter(
+            model_path=args.trustrag_encoder_path,
+            device=device,
+            max_length=512,
+        )
+        print(f"原版 TrustRAG 已启用（固定 ROUGE-L 门控）：{args.trustrag_encoder_path}")
+    medical_cluster_filter = None
+    if args.medical_semantic_clustering:
+        medical_cluster_filter = MedicalSemanticClusterFilter(
+            model_path=args.medical_cluster_encoder_path,
+            device=device,
+            batch_size=args.medical_cluster_batch_size,
+            max_length=args.medical_cluster_max_length,
+            similarity_threshold=args.medical_cluster_similarity_threshold,
+            lexical_threshold=0.25,
+        )
+        print(f"医学语义聚类已启用：{args.medical_cluster_encoder_path}")
+    candidate_k = max(args.top_k, args.medical_cluster_candidate_k) if medical_cluster_filter is not None and trustrag_filter is None else args.top_k
+
     all_results = []
     asr_list=[]
     ret_list=[]
@@ -471,7 +509,7 @@ def main():
 
             else: # topk
                 query_id = incorrect_answers[i]['id']
-                topk_idx = list(results.get(query_id, {}).keys())[:args.top_k]
+                topk_idx = list(results.get(query_id, {}).keys())[:candidate_k]
                 topk_results = []
                 for idx in topk_idx:
                     if idx in corpus:
@@ -508,11 +546,19 @@ def main():
                             topk_results.append({'score': adv_sim, 'context': adv_text_list[j]})
 
                     topk_results = sorted(topk_results, key=lambda x: float(x['score']), reverse=True)
-                    topk_contents = [topk_results[j]["context"] for j in range(min(args.top_k, len(topk_results)))]
+                    topk_contents = [item["context"] for item in topk_results]
                     adv_text_set = set(adv_text_groups[iter_idx])
                 else:
                     topk_results = sorted(topk_results, key=lambda x: float(x['score']), reverse=True)
-                    topk_contents = [topk_results[j]["context"] for j in range(min(args.top_k, len(topk_results)))]
+                    topk_contents = [item["context"] for item in topk_results]
+
+                trustrag_stats = TrustRAGOriginalStats(False, False, 0)
+                if trustrag_filter is not None:
+                    topk_contents, trustrag_stats = trustrag_filter.filter(topk_contents[:args.top_k])
+                medical_cluster_stats = TrustRAGFilterStats(False, False, 0, 0, 0.0)
+                if medical_cluster_filter is not None:
+                    topk_contents, medical_cluster_stats = medical_cluster_filter.filter(topk_contents, min_keep=args.top_k)
+                topk_contents = topk_contents[:args.top_k]
 
                 cnt_from_adv_pre = sum([c in adv_text_set for c in topk_contents])
 
@@ -544,7 +590,11 @@ def main():
                 # ------------------------------------------------------------------
                 query_prompt = ""  # will be non-empty only for standard RAG
                 agentic_adv_survived = -1  # set only for agentic_rag mode
-                if args.agentic_rag:
+                trustrag_internal_knowledge = ""
+                trustrag_consolidated = ""
+                if trustrag_filter is not None:
+                    response, trustrag_internal_knowledge, trustrag_consolidated = trustrag_conflict_answer(llm, question, topk_contents)
+                elif args.agentic_rag:
                     _agentic_result = run_agentic_rag(
                         llm=llm,
                         question=question,
@@ -601,6 +651,15 @@ def main():
                         "judge_filtered_count": judge_filtered_count,
                         "judge_filtered_adv_count": judge_filtered_adv_count,
                         "topk_count_after_judge": len(topk_contents),
+                        "trustrag_filter_enabled": trustrag_filter is not None,
+                        "trustrag_filter_applied": trustrag_stats.applied,
+                        "trustrag_rouge_triggered": trustrag_stats.rouge_triggered,
+                        "trustrag_removed_count": trustrag_stats.removed_count,
+                        "trustrag_internal_knowledge": trustrag_internal_knowledge,
+                        "trustrag_consolidated_context": trustrag_consolidated,
+                        "medical_semantic_clustering_enabled": medical_cluster_filter is not None,
+                        "medical_semantic_clustering_applied": medical_cluster_stats.applied,
+                        "medical_semantic_clustering_removed_count": medical_cluster_stats.removed_count,
                         "parsed_pred_label": parsed_pred_label,
                         "target_label": target_label,
                         "incorrect_answer": incco_ans,

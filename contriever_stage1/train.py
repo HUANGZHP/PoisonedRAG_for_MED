@@ -29,8 +29,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--blackbox-path", default="processed/pubmedqa_blackbox.jsonl")
     parser.add_argument("--hotflip-path", default="processed/pubmedqa_hotflip.jsonl")
     parser.add_argument("--model-name", default="facebook/contriever")
-    parser.add_argument("--local-model-path", default="")
-    parser.add_argument("--output-dir", default="checkpoint/contriever_v1")
+    parser.add_argument("--local-model-path", default="/home/HF_Model/facebook/contriever")
+    parser.add_argument("--output-dir", default="checkpoint")
     parser.add_argument("--epochs", type=int, default=5)
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--num-workers", type=int, default=0)
@@ -57,10 +57,9 @@ def _device(gpu: int) -> torch.device:
 
 def _resolve_model_source(model_name: str, local_model_path: str) -> str:
     """优先使用本地缓存的官方 facebook/contriever，避免服务器联网下载。"""
-    if local_model_path:
-        local_path = Path(local_model_path)
-        if local_path.is_dir():
-            return str(local_path)
+    local_path = Path(local_model_path)
+    if local_path.is_dir():
+        return str(local_path)
     return model_name
 
 

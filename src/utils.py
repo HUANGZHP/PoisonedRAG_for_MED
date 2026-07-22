@@ -51,11 +51,26 @@ HF_MODEL_ROOT = os.environ.get("HF_MODEL_ROOT", "/home/HF_Model")
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CONTRIEVER_V1_PATH = os.environ.get(
     "CONTRIEVER_V1_PATH",
-    str(REPO_ROOT / "checkpoint" / "contriever_v1" / "best_model"),
+    _pick_existing_path(
+        str(REPO_ROOT / "checkpoint" / "contriever_v1" / "best_model"),
+        str(REPO_ROOT / "checkpoint" / "best_model"),
+    ) or str(REPO_ROOT / "checkpoint" / "contriever_v1" / "best_model"),
 )
 CONTRIEVER_V2_PATH = os.environ.get(
     "CONTRIEVER_V2_PATH",
     str(REPO_ROOT / "checkpoint" / "contriever_v2" / "best_model"),
+)
+CONTRIEVER_V3_PATH = os.environ.get(
+    "CONTRIEVER_V3_PATH",
+    str(REPO_ROOT / "checkpoint" / "contriever_v3" / "best_model"),
+)
+CONTRIEVER_V4_PATH = os.environ.get(
+    "CONTRIEVER_V4_PATH",
+    str(REPO_ROOT / "checkpoint" / "contriever_v4" / "best_model"),
+)
+CONTRIEVER_V5_PATH = os.environ.get(
+    "CONTRIEVER_V5_PATH",
+    str(REPO_ROOT / "checkpoint" / "contriever_v5" / "best_model"),
 )
 
 model_code_to_qmodel_name = {
@@ -65,6 +80,9 @@ model_code_to_qmodel_name = {
     ) or "facebook/contriever",
     "contriever_v1": CONTRIEVER_V1_PATH,
     "contriever_v2": CONTRIEVER_V2_PATH,
+    "contriever_v3": CONTRIEVER_V3_PATH,
+    "contriever_v4": CONTRIEVER_V4_PATH,
+    "contriever_v5": CONTRIEVER_V5_PATH,
     "contriever-msmarco": _pick_existing_path(
         os.path.join(HF_MODEL_ROOT, "facebook", "contriever-msmarco"),
         os.path.join(HF_MODEL_ROOT, "contriever-msmarco"),
@@ -89,6 +107,9 @@ model_code_to_cmodel_name = {
     "contriever": model_code_to_qmodel_name["contriever"],
     "contriever_v1": model_code_to_qmodel_name["contriever_v1"],
     "contriever_v2": model_code_to_qmodel_name["contriever_v2"],
+    "contriever_v3": model_code_to_qmodel_name["contriever_v3"],
+    "contriever_v4": model_code_to_qmodel_name["contriever_v4"],
+    "contriever_v5": model_code_to_qmodel_name["contriever_v5"],
     "contriever-msmarco": model_code_to_qmodel_name["contriever-msmarco"],
     "contriever-chinese": model_code_to_qmodel_name["contriever-chinese"],
     "ance": model_code_to_qmodel_name["ance"],

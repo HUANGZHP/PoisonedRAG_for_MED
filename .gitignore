@@ -189,6 +189,7 @@ cython_debug/
 #.idea/
 
 # generated data / large artifacts
+checkpoint/
 datasets/
 results/
 logs/
