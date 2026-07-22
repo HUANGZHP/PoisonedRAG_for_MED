@@ -228,9 +228,15 @@ class Attacker():
                 count=self.adv_per_query,
             )
 
-        # Keep original behavior by default: prefer curated json adversarial passages.
+        # JSON 攻击模式必须使用完整的预生成恶意文本，禁止静默降级为模板文本。
         if self.adv_source == 'json':
-            adv_texts = adv_from_json[: self.adv_per_query]
+            if len(adv_from_json) < self.adv_per_query:
+                raise ValueError(
+                    f"query_id={query_id} 的 JSON 攻击文本不足：需要 "
+                    f"{self.adv_per_query} 条，实际只有 {len(adv_from_json)} 条。"
+                    "请先生成并校验 adv_texts，实验已停止。"
+                )
+            return adv_from_json[: self.adv_per_query]
 
         # If corpus source has too few passages, supplement with curated json passages first.
         if self.adv_source == 'corpus' and len(adv_texts) < self.adv_per_query and adv_from_json:
