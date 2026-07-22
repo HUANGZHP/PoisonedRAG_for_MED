@@ -290,9 +290,9 @@ def _load_subset_from_chunk_dir(
 
     # PubMed 分片 ID 采用 ``<chunk_stem>_<row_index>`` 形式；全部 ID 符合时跳过无关分片。
     stem_to_file = {file_path.stem: file_path for file_path in files}
-    prefixes = {doc_id.rsplit("_", 1)[0] for doc_id in remaining if "_" in doc_id}
-    if len(prefixes) == len(remaining) and prefixes.issubset(stem_to_file):
-        selected_files = [stem_to_file[stem] for stem in sorted(prefixes)]
+    prefixes = [doc_id.rsplit("_", 1)[0] for doc_id in remaining if "_" in doc_id]
+    if len(prefixes) == len(remaining) and set(prefixes).issubset(stem_to_file):
+        selected_files = [stem_to_file[stem] for stem in sorted(set(prefixes))]
     else:
         selected_files = files
 
