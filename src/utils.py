@@ -17,6 +17,7 @@ except ImportError:
     GenericDataLoader = None
 from src.medrag_corpus import (
     load_medrag_corpus,
+    load_medrag_corpus_subset,
     MEDRAG_DATASETS,
     DEFAULT_MEDRAG_DATA_DIR,
     DEFAULT_MEDRAG_ROOT,
@@ -645,8 +646,13 @@ def load_medrag_datasets(
     require_queries: bool = True,
     require_qrels: bool = True,
     medrag_root: Optional[str] = None,
+    corpus_ids: Optional[Iterable[str]] = None,
 ):
-    corpus = load_medrag_corpus(dataset, medrag_root=medrag_root)
+    corpus = (
+        load_medrag_corpus_subset(dataset, list(corpus_ids), medrag_root=medrag_root)
+        if corpus_ids is not None
+        else load_medrag_corpus(dataset, medrag_root=medrag_root)
+    )
     q_path, r_path = _resolve_medrag_query_qrels_paths(dataset, split, medrag_root)
 
     queries = _load_queries(q_path) if q_path else {}
@@ -664,6 +670,7 @@ def load_beir_datasets(
     split: str = "test",
     require_queries: bool = True,
     require_qrels: bool = True,
+    corpus_ids: Optional[Iterable[str]] = None,
 ):
     if _is_medrag_dataset(dataset):
         return load_medrag_datasets(
@@ -671,6 +678,7 @@ def load_beir_datasets(
             split=split,
             require_queries=require_queries,
             require_qrels=require_qrels,
+            corpus_ids=corpus_ids,
         )
 
     if dataset == "msmarco" and split == "test":

@@ -256,13 +256,16 @@ def main():
     if device == 'cpu' and has_attack:
         print("Warning: CUDA is unavailable. Attack-related embedding computations may be slow on CPU.")
 
-    # load target queries and answers
-    corpus, queries, qrels = load_beir_datasets(
-        args.eval_dataset,
-        args.split,
-        require_queries=use_truth,
-        require_qrels=use_truth,
-    )
+    # 真值上下文模式需要完整 qrels/corpus；普通评测会在读取检索结果后只加载候选文档。
+    if use_truth:
+        corpus, queries, qrels = load_beir_datasets(
+            args.eval_dataset,
+            args.split,
+            require_queries=True,
+            require_qrels=True,
+        )
+    else:
+        corpus, queries, qrels = {}, {}, {}
 
     if has_attack:
         adv_json_path = args.adv_json_path.strip() if isinstance(args.adv_json_path, str) else ''
@@ -328,6 +331,29 @@ def main():
         results = json.load(f)
     # assert len(qrels) <= len(results)
     print('Total samples:', len(results))
+
+    candidate_k = (
+        max(args.top_k, args.medical_cluster_candidate_k)
+        if args.medical_semantic_clustering and not args.trustrag_filter
+        else args.top_k
+    )
+    if not use_truth:
+        evaluated_rows = incorrect_answers[: args.M * args.repeat_times]
+        candidate_doc_ids = []
+        for row in evaluated_rows:
+            query_id = str(row.get('id', ''))
+            candidate_doc_ids.extend(list(results.get(query_id, {}).keys())[:candidate_k])
+        corpus, _, _ = load_beir_datasets(
+            args.eval_dataset,
+            args.split,
+            require_queries=False,
+            require_qrels=False,
+            corpus_ids=candidate_doc_ids,
+        )
+        print(
+            f"Loaded {len(corpus)} candidate documents for {len(evaluated_rows)} evaluation queries "
+            f"(instead of the full corpus)."
+        )
 
     attacker = None
     bm25_scorer = None
@@ -415,7 +441,6 @@ def main():
             lexical_threshold=0.25,
         )
         print(f"医学语义聚类已启用：{args.medical_cluster_encoder_path}")
-    candidate_k = max(args.top_k, args.medical_cluster_candidate_k) if medical_cluster_filter is not None and trustrag_filter is None else args.top_k
 
     all_results = []
     asr_list=[]
@@ -576,6 +601,7 @@ def main():
                 trustrag_internal_knowledge = ""
                 trustrag_consolidated = ""
                 if trustrag_filter is not None:
+                    query_prompt = "TrustRAG 三阶段冲突消解（候选文档数：%d）" % len(topk_contents)
                     response, trustrag_internal_knowledge, trustrag_consolidated = trustrag_conflict_answer(llm, question, topk_contents)
                 elif question_type == "mcq" and options:
                     query_prompt = wrap_multiple_choice_prompt(question, topk_contents, options)

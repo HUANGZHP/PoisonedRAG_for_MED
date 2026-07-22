@@ -273,6 +273,54 @@ def _load_from_chunk_dir(dataset: str, chunk_dir: Path) -> Dict[str, Dict[str, s
     return corpus
 
 
+def _load_subset_from_chunk_dir(
+    dataset: str,
+    chunk_dir: Path,
+    requested_ids: Sequence[str],
+) -> Dict[str, Dict[str, str]]:
+    """从分片语料中仅保留指定文档，避免评测时常驻加载整个医学语料库。"""
+    ext, files, _ = _detect_chunk_files(chunk_dir)
+    if not files:
+        raise FileNotFoundError(f"No supported chunk files found in {chunk_dir}")
+
+    remaining = {str(doc_id) for doc_id in requested_ids if str(doc_id)}
+    corpus: Dict[str, Dict[str, str]] = {}
+    if not remaining:
+        return corpus
+
+    # PubMed 分片 ID 采用 ``<chunk_stem>_<row_index>`` 形式；全部 ID 符合时跳过无关分片。
+    stem_to_file = {file_path.stem: file_path for file_path in files}
+    prefixes = {doc_id.rsplit("_", 1)[0] for doc_id in remaining if "_" in doc_id}
+    if len(prefixes) == len(remaining) and prefixes.issubset(stem_to_file):
+        selected_files = [stem_to_file[stem] for stem in sorted(prefixes)]
+    else:
+        selected_files = files
+
+    for file_path in tqdm(selected_files, desc=f"Loading selected {dataset} chunks", unit="file"):
+        try:
+            for index, obj in enumerate(_iter_docs_from_chunk_file(file_path, ext)):
+                if not isinstance(obj, dict):
+                    continue
+                doc_id, doc = _extract_doc(obj, index)
+                if doc_id in remaining:
+                    corpus[doc_id] = doc
+                    remaining.remove(doc_id)
+                    if not remaining:
+                        break
+        except Exception as exc:
+            logging.warning("Failed reading chunk file %s: %s", file_path, exc)
+        if not remaining:
+            break
+
+    if remaining:
+        logging.warning(
+            "Could not find %d requested documents in dataset=%s; they will be skipped.",
+            len(remaining),
+            dataset,
+        )
+    return corpus
+
+
 def load_medrag_corpus(dataset: str, medrag_root: Optional[str] = None) -> Dict[str, Dict[str, str]]:
     """
     Return BEIR-compatible corpus format:
@@ -306,6 +354,36 @@ def load_medrag_corpus(dataset: str, medrag_root: Optional[str] = None) -> Dict[
 
     logging.info("Loaded %d documents for dataset=%s from single corpus file", len(corpus), dataset)
     return corpus
+
+
+def load_medrag_corpus_subset(
+    dataset: str,
+    doc_ids: Sequence[str],
+    medrag_root: Optional[str] = None,
+) -> Dict[str, Dict[str, str]]:
+    """返回指定文档 ID 的 MedRAG 子集，用于已有检索结果的轻量评测。"""
+    dataset = _normalize_dataset(dataset)
+    requested_ids = [str(doc_id) for doc_id in doc_ids if str(doc_id)]
+    if not requested_ids:
+        return {}
+
+    repo_root = Path(__file__).resolve().parents[1]
+    root = Path(medrag_root) if medrag_root else None
+    dataset_dir = _resolve_dataset_dir(dataset, repo_root, root)
+    if dataset_dir is not None:
+        chunk_dir = dataset_dir / "chunk"
+        if chunk_dir.exists() and chunk_dir.is_dir():
+            logging.info(
+                "Loading %d selected documents for dataset=%s from chunk shards",
+                len(set(requested_ids)),
+                dataset,
+            )
+            return _load_subset_from_chunk_dir(dataset, chunk_dir, requested_ids)
+
+    # 单文件旧格式没有高效随机访问索引；保持兼容性并在最后裁剪。
+    full_corpus = load_medrag_corpus(dataset, medrag_root=medrag_root)
+    requested = set(requested_ids)
+    return {doc_id: doc for doc_id, doc in full_corpus.items() if doc_id in requested}
 
 
 class MedCorpus:
