@@ -445,12 +445,12 @@ python run_experiment_from_config.py
 "entrypoint": "standard",
 "medical_kg_filter": True,
 "medical_kg_mode": "original",
-"medical_kg_artifact_dir": "datasets/medical_kg/bios_v3_clinical_priority_20260812",
+"medical_kg_artifact_dir": "datasets/medical_kg/bios_v3_english_pt_full_20260813",
 ```
 
-其中，`original` 与论文的段落级二值判定保持一致：一篇文档只要存在未被 BIOS 图谱验证的三元组，风险即为 1；`conservative` 则把低相似度映射得到的 `unknown` 保持中性，以降低公开图谱覆盖不完整造成的误删。KG 首先重排 `medical_kg_candidate_k` 篇候选（默认 10），然后只把最终 `top_k` 篇交给后续 TrustRAG 或回答模型；它不会重新生成检索文件。
+默认工件为公开 BIOS v3 的全量英文 preferred-term 临床关系图：454,746 个概念、1,109,060 条有效边，13 类医学验证关系均不做配额或随机抽样。它仍是对论文“去同义词节点”预处理的可复现近似，不等同于论文未公开的精简图快照。
 
-KG 当前的排序分数为 `(1 - medical_kg_rerank_weight) × 归一化检索分数 + medical_kg_rerank_weight × (1 - KG 风险)`。集中配置默认设为 `0.80`，即检索分数与安全分数按 2:8 合成；这会加强高风险文档的降权，但不会像严格硬过滤那样直接删除它们。
+其中，`original` 与论文的段落级二值判定保持一致：一篇文档只要存在未被 BIOS 图谱验证的三元组，风险即为 1；`conservative` 则把低相似度映射得到的 `unknown` 保持中性，以降低公开图谱覆盖不完整造成的误删。KG 首先重排 `medical_kg_candidate_k` 篇候选（默认 10），然后只把最终 `top_k` 篇交给后续 TrustRAG 或回答模型；它不会重新生成检索文件。
 
 #### 工作流程、模式与边界
 
@@ -458,10 +458,10 @@ KG 当前的排序分数为 `(1 - medical_kg_rerank_weight) × 归一化检索�
 
 ```text
 raw-dot 检索 top-10
-  → LLM 抽取每篇文档的（实体 1，关系，实体 2）
+  → LLM 从每篇文档最多 6,000 个字符中抽取至多 10 个（实体 1，关系，实体 2）
   → MedCPT 映射关系与该关系允许的实体端点
   → 查询 BIOS 是否存在对应真实边
-  → 计算二值文档风险
+  → 计算文档级 KG 风险
   → rerank 选出 top-5，或 hard_filter 直接删除高风险文档
   → （可选）原版 TrustRAG → 回答模型
 ```
@@ -472,7 +472,39 @@ raw-dot 检索 top-10
 | 风险计算 | 任一三元组为 `invalid` 或 `unknown`，文档风险即为 1 | `invalid / (valid + invalid)`；`unknown` 中性，若没有可判定三元组则风险为 0 |
 | 适用性 | 与论文段落级筛查口径最接近 | 用于公开 BIOS 覆盖不完整时降低误删 |
 
-当前实现只提供上述**二值风险**。此前的连续证据风险公式已移除，不能再通过配置或命令行启用；历史结果目录只用于追溯，不应用于复现实验。
+#### 当前风险分的精确定义
+
+风险分是**文档级**的，不把问题文本直接代入公式；问题只在前一步决定哪些文档会进入候选池。对每个抽取出的三元组，系统先匹配关系，再只在该关系允许的头、尾实体集合中用 MedCPT 找最相近实体，最后检查映射后的边是否真实存在于 BIOS。
+
+设一篇文档的三元组审计计数为 `valid`、`invalid`、`unknown`、`ignored`，则：
+
+\[
+R_{\mathrm{original}}(d)=
+\begin{cases}
+1,&N_{\mathrm{invalid}}+N_{\mathrm{unknown}}>0\\
+0,&\text{其他情况}
+\end{cases}
+\]
+
+\[
+R_{\mathrm{conservative}}(d)=
+\begin{cases}
+\dfrac{N_{\mathrm{invalid}}}{N_{\mathrm{valid}}+N_{\mathrm{invalid}}},&N_{\mathrm{valid}}+N_{\mathrm{invalid}}>0\\
+0,&\text{其他情况}
+\end{cases}
+\]
+
+因此，默认 `original` 是“一票否决”：哪怕一条三元组无法验证，文档风险就是 1。`conservative` 不会因为低置信或知识图谱未覆盖而惩罚 `unknown`；例如 1 条 `valid`、1 条 `invalid` 的风险为 0.5，只有 `unknown` 时风险为 0。当前全量 BIOS 工件的 `non_strict_relations=[]`，所以没有被忽略的关系；历史临床优先工件才会将 `associated with` 标为 `ignored`。
+
+默认 `rerank` 先对当前候选池的检索分数做 min-max 归一化，再计算：
+
+\[
+S(d)=(1-w)\widetilde{S}_{\mathrm{retrieval}}(d)+w(1-R(d))
+\]
+
+其中默认 \(w=0.80\)，即检索分数 : KG 安全分数 = 2:8。若设置 `medical_kg_decision_mode="hard_filter"`，则不使用该混合分：满足 \(R(d)\geq\texttt{medical\_kg\_hard\_filter\_threshold}\) 的文档会被直接删除（默认阈值 1.0），余下文档保持原检索排序，且不会为了凑满 `top_k` 把已删文档放回。
+
+此前讨论过的“KG 支持度 + 冲突度 + 候选异常模式”的连续风险公式已经移除，当前代码没有使用该公式，也没有对候选文档间的重复模式额外加分。
 
 KG 仅接入 `entrypoint="standard"`。和 TrustRAG 同开时，KG 先从 top-10 选出最终候选，原版 TrustRAG 随后处理这些候选；二者都不会把已被前一层删除的文档重新补回。医疗语义聚类是独立模块，若开启则在 TrustRAG 之后运行。
 
@@ -512,7 +544,7 @@ KG 仅接入 `entrypoint="standard"`。和 TrustRAG 同开时，KG 先从 top-10
 
 此时 `original` 二值规则标为 `kg_risk=1` 的候选会在回答前直接删除；剩余文档保持原始检索顺序，**不会**为了凑足 `top_k` 把已删候选放回。因而最终上下文可能少于 5 篇，甚至为空；结果会记录 `medical_kg_hard_filtered_count` 和每篇文档的 `hard_filtered` 标记。
 
-公开 BIOS-v3 的构建输入位于 `/home/Dataset/BIOS_v3/`。当前默认工件为 `datasets/medical_kg/bios_v3_english_pt_full_20260813`：保留英文 preferred-term 节点之间、医学三元组验证使用的全部 13 类关系边，**不做关系配额、reservoir 抽样或低优先级关系排除**；`associated with` 也会进入图并接受严格验证。仅保留英文 PT 是论文“去同义词节点”预处理的可复现近似，不等同于随机抽样。旧的 `bios_v3_clinical_priority_20260812` 与 `bios_v3_preferred_sample_20260803` 均保留作历史对照，结果不得与全量工件混称。三者都不是论文未公开的原始精简图快照；若取得论文规范图，应以 `scripts/build_bios_refined_kg.py --triples-json <ground_truth.json>` 重建并在配置中替换路径。
+公开 BIOS-v3 的构建输入位于 `/home/Dataset/BIOS_v3/`。当前默认工件为 `datasets/medical_kg/bios_v3_english_pt_full_20260813`：保留英文 preferred-term 节点之间、医学三元组验证使用的全部 13 类关系边，**不做关系配额、reservoir 抽样或低优先级关系排除**；`associated with` 也按严格关系处理（本版源数据中没有可用的英文 PT 边）。仅保留英文 PT 是论文“去同义词节点”预处理的可复现近似，不等同于随机抽样。旧的 `bios_v3_clinical_priority_20260812` 与 `bios_v3_preferred_sample_20260803` 均保留作历史对照，结果不得与全量工件混称。三者都不是论文未公开的原始精简图快照；若取得论文规范图，应以 `scripts/build_bios_refined_kg.py --triples-json <ground_truth.json>` 重建并在配置中替换路径。
 
 临时关闭默认 KG 防御可在直接运行时加：
 
@@ -683,12 +715,3 @@ grep -aE "Namespace|Using|Doing|ASR Mean|F1 mean|Ending" logs/user_runs_logs/*.o
 | 检索结果 | `results/beir_results/` | `.json` |
 | 评测结果（逐 query 详情） | `results/query_results/<dir>/<name>.json` | `.json` |
 | 运行日志 | `logs/user_runs_logs/<name>.out` | 文本 |
-
-## Current evaluation-integrity rules
-
-- PubMedQA is evaluated with its declared closed label space: yes, no, and maybe. Every direct, TrustRAG, Agentic, and Reason-in-Documents path receives that same label space.
-- A parsed closed-label answer must be exactly one declared token after removal of model-control wrappers. Punctuation, explanations, or multiple labels are recorded as unparsed rather than silently coerced.
-- Retrieval F1 defines a query with zero precision and zero recall as F1 = 0. This prevents undefined values from contaminating aggregate metrics.
-- TrustRAG uses the legacy KMeans+ROUGE selection behavior for compatibility experiments. It may delete to fewer than top_k documents; this is a defense-algorithm choice, while own-5 injection, raw-dot scoring, closed-label parsing, strict ASR, and F1 handling remain unchanged.
-- Judge filtering operates on the reserve candidate pool. If fewer than top_k documents would remain, it restores the original ranked candidates and records the retention fallback; it never passes an empty evidence set to answering.
-- TrustRAG raw evidence is quoted as untrusted data in the final verification stage. A run started before a code change remains a pre-change result and must not be combined with post-change results.
