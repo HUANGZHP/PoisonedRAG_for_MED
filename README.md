@@ -478,29 +478,23 @@ raw-dot 检索 top-10
 
 设一篇文档的三元组审计计数为 `valid`、`invalid`、`unknown`、`ignored`，则：
 
-\[
-R_{\mathrm{original}}(d)=
-\begin{cases}
-1,&N_{\mathrm{invalid}}+N_{\mathrm{unknown}}>0\\
-0,&\text{其他情况}
-\end{cases}
-\]
+```text
+original：
+R_original(d) = 1，若 N_invalid + N_unknown > 0
+R_original(d) = 0，其他情况
 
-\[
-R_{\mathrm{conservative}}(d)=
-\begin{cases}
-\dfrac{N_{\mathrm{invalid}}}{N_{\mathrm{valid}}+N_{\mathrm{invalid}}},&N_{\mathrm{valid}}+N_{\mathrm{invalid}}>0\\
-0,&\text{其他情况}
-\end{cases}
-\]
+conservative：
+R_conservative(d) = N_invalid / (N_valid + N_invalid)，若 N_valid + N_invalid > 0
+R_conservative(d) = 0，其他情况
+```
 
 因此，默认 `original` 是“一票否决”：哪怕一条三元组无法验证，文档风险就是 1。`conservative` 不会因为低置信或知识图谱未覆盖而惩罚 `unknown`；例如 1 条 `valid`、1 条 `invalid` 的风险为 0.5，只有 `unknown` 时风险为 0。当前全量 BIOS 工件的 `non_strict_relations=[]`，所以没有被忽略的关系；历史临床优先工件才会将 `associated with` 标为 `ignored`。
 
 默认 `rerank` 先对当前候选池的检索分数做 min-max 归一化，再计算：
 
-\[
-S(d)=(1-w)\widetilde{S}_{\mathrm{retrieval}}(d)+w(1-R(d))
-\]
+```text
+S(d) = (1 - w) × normalized_retrieval_score(d) + w × (1 - R(d))
+```
 
 其中默认 \(w=0.80\)，即检索分数 : KG 安全分数 = 2:8。若设置 `medical_kg_decision_mode="hard_filter"`，则不使用该混合分：满足 \(R(d)\geq\texttt{medical\_kg\_hard\_filter\_threshold}\) 的文档会被直接删除（默认阈值 1.0），余下文档保持原检索排序，且不会为了凑满 `top_k` 把已删文档放回。
 
