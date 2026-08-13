@@ -68,7 +68,7 @@ def parse_args():
         "--eval_model_code",
         type=str,
         default="contriever",
-        choices=["contriever-msmarco", "contriever", "contriever-chinese", "ance"],
+        choices=["contriever-msmarco", "contriever", "contriever-chinese", "contriever-chinese_v1", "ance"],
     )
     parser.add_argument("--eval_dataset", type=str, default="nq", help="BEIR dataset to evaluate")
     parser.add_argument("--split", type=str, default="test")

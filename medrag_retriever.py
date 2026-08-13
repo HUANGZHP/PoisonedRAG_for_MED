@@ -90,9 +90,11 @@ class MedCPTRetriever:
 
     def __init__(
         self,
-        corpus: MedCorpus,
+        corpus: Optional[MedCorpus] = None,
         index_base_dir: Optional[str] = None,
+        sources: Optional[Sequence[str]] = None,
         query_encoder_name: Optional[str] = None,
+        max_length: int = 512,
         device: Optional[str] = None,
         use_mmap: bool = True,
         normalize_query: bool = False,
@@ -106,8 +108,22 @@ class MedCPTRetriever:
         if faiss is None:
             raise ImportError(f"faiss is required but unavailable: {_FAISS_IMPORT_ERROR}")
 
+        if corpus is None and not index_base_dir:
+            raise ValueError("index_base_dir is required when no MedCorpus is supplied.")
+        if corpus is None and not sources:
+            raise ValueError("sources is required when no MedCorpus is supplied.")
+
         self.corpus = corpus
-        self.index_base_dir = Path(index_base_dir) if index_base_dir else Path(corpus.base_dir)
+        self.index_base_dir = (
+            Path(index_base_dir)
+            if index_base_dir
+            else Path(corpus.base_dir)  # type: ignore[union-attr]
+        )
+        self.sources = (
+            [str(source).strip().lower() for source in sources if str(source).strip()]
+            if sources is not None
+            else list(corpus.sources)  # type: ignore[union-attr]
+        )
         self.query_encoder_name = self._resolve_query_encoder_name(query_encoder_name)
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.use_mmap = use_mmap
@@ -119,10 +135,14 @@ class MedCPTRetriever:
         self.faiss_gpu_use_float16 = bool(faiss_gpu_use_float16)
         self._gpu_resources: List[Any] = []
         self._partial_source_warned: set[str] = set()
-        self._loaded_docs_per_source: Dict[str, int] = {
-            src: len(getattr(self.corpus, "_source_doc_ids", {}).get(src, []))
-            for src in self.corpus.sources
-        }
+        self._loaded_docs_per_source: Dict[str, int] = (
+            {
+                src: len(getattr(self.corpus, "_source_doc_ids", {}).get(src, []))
+                for src in self.sources
+            }
+            if self.corpus is not None
+            else {}
+        )
 
         faiss_gpu_available = hasattr(faiss, "StandardGpuResources")
         if use_faiss_gpu is None:
@@ -141,6 +161,7 @@ class MedCPTRetriever:
         self.query_encoder = AutoModel.from_pretrained(self.query_encoder_name)
         self.query_encoder.to(self.device)
         self.query_encoder.eval()
+        self.max_length = self._validate_max_length(max_length)
         if fp16 and self.device.startswith("cuda"):
             self.query_encoder.half()
 
@@ -191,6 +212,30 @@ class MedCPTRetriever:
 
         return "ncbi/MedCPT-Query-Encoder"
 
+    def _validate_max_length(self, requested: int) -> int:
+        try:
+            requested = int(requested)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"Invalid MedCPT max_length={requested!r}") from exc
+
+        if requested <= 0:
+            raise ValueError(f"MedCPT max_length must be positive, got {requested}.")
+
+        limits = []
+        tokenizer_limit = getattr(self.tokenizer, "model_max_length", None)
+        if isinstance(tokenizer_limit, int) and 0 < tokenizer_limit < 1_000_000:
+            limits.append(tokenizer_limit)
+        config_limit = getattr(getattr(self.query_encoder, "config", None), "max_position_embeddings", None)
+        if isinstance(config_limit, int) and config_limit > 0:
+            limits.append(config_limit)
+
+        supported = min(limits) if limits else 512
+        if requested > supported:
+            raise ValueError(
+                f"MedCPT max_length={requested} exceeds the loaded encoder limit={supported}."
+            )
+        return requested
+
     def _resolve_faiss_gpu_devices(
         self,
         faiss_gpu_devices: Optional[Sequence[int]],
@@ -221,7 +266,7 @@ class MedCPTRetriever:
         return parsed
 
     def _load_all_source_indices(self):
-        for source in self.corpus.sources:
+        for source in self.sources:
             try:
                 src_idx = self._load_source_index(source)
             except FileNotFoundError as exc:
@@ -471,7 +516,7 @@ class MedCPTRetriever:
             [query],
             padding=True,
             truncation=True,
-            max_length=512,
+            max_length=self.max_length,
             return_tensors="pt",
         )
         inputs = {k: v.to(self.device) for k, v in inputs.items()}
@@ -521,7 +566,7 @@ class MedCPTRetriever:
             if index_ntotal <= 0:
                 continue
 
-            loaded_docs = int(self._loaded_docs_per_source.get(source, 0))
+            loaded_docs = int(self._loaded_docs_per_source.get(source, index_ntotal))
             if (
                 loaded_docs > 0
                 and loaded_docs < index_ntotal
@@ -546,23 +591,23 @@ class MedCPTRetriever:
 
                 score = float(scores[0][rank])
                 doc_id = self._resolve_doc_id(src, int(row_idx))
-                doc = self.corpus.get_document_by_id(doc_id)
+                doc = self.corpus.get_document_by_id(doc_id) if self.corpus is not None else None
 
-                if doc is None:
+                if doc is None and self.corpus is not None:
                     # If corpus ID format changed, try source-prefixed fallback.
                     prefixed = f"{source}:{doc_id}"
                     doc = self.corpus.get_document_by_id(prefixed)
 
-                if doc is None:
+                if doc is None and self.corpus is not None:
                     continue
 
                 merged.append(
                     {
-                        "text": doc["text"],
+                        "text": doc["text"] if doc is not None else "",
                         "score": score,
-                        "id": doc["id"],
-                        "title": doc.get("title", ""),
-                        "source": doc.get("source", source),
+                        "id": doc["id"] if doc is not None else doc_id,
+                        "title": doc.get("title", "") if doc is not None else "",
+                        "source": doc.get("source", source) if doc is not None else source,
                     }
                 )
 

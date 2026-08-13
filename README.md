@@ -15,6 +15,7 @@
 | **Agentic RAG** (Search-o1) | 多轮「搜索→推理→再搜索」循环 |
 | **Reason-in-Docs** (RiD) | 对检索文档逐篇分析，提取有用信息 |
 | **RiD 防御模式** | 严格相关性过滤，丢弃不相关/误导性文档 |
+| **BIOS 医学知识图谱防御** | 用 LLM 三元组、MedCPT 映射与 BIOS 图谱边验证为候选文档计风险并重排 |
 
 ## 1. 环境与依赖
 
@@ -75,8 +76,10 @@ datasets/pubmed/
 - **contriever_v3**: PubMedQA 与 MedQA 1:1 replay 微调版
 - **contriever_v4**: PQA-U 与 MedQA 1:1 微调版
 - **contriever_v5**: 仅以 MedQA 训练的微调版
+- **contriever_v6**: 剔除 MIRAGE PubMedQA 题目后，以 PQA-U 与 MedQA 1:1 微调的 v4 对照版
 - **contriever-msmarco**: MS MARCO 微调版 Contriever
 - **contriever-chinese**: 中文场景优化的 Contriever
+- **contriever-chinese_v1**: 使用 v8 的 PQA-U/MedQA 8:8 replay 训练配方，在 `contriever-chinese` 基础模型上微调的独立语言迁移实验（训练数据为英文医学 QA）
 - **ance**: Approximate Nearest Neighbor Negative Contrastive Estimation
 - **dpr**: Dense Passage Retrieval
 - **bm25**: 稀疏检索（依赖 pyserini）
@@ -305,12 +308,14 @@ python scripts/validate_training_data.py --source "$MEDQA_USMLE" --blackbox proc
 
 ```bash
 python -u evaluate_beir.py \
-  --model_code <medcpt|contriever|contriever_v1|contriever_v2|contriever_v3|contriever_v4|contriever_v5|dpr|ance|bm25> \
+  --model_code <medcpt|contriever|contriever_v1|contriever_v2|contriever_v3|contriever_v4|contriever_v5|contriever_v6|dpr|ance|bm25> \
   --dataset <pubmed|statpearls|textbooks|hotpotqa|nq|msmarco> \
-  --split test --top_k 100 \
+  --split test --top_k 100 --score_function dot \
   --queries-json <path/to/queries.json> \
-  --result_output <path/to/retrieval.json>
+  --result_output <path/to/retrieval-dot.json>
 ```
+
+experiment_config.py 中的 score_function 控制新实验的相似度，默认值为 dot（与原论文一致）；cosine 实验须显式指定 cos_sim。预检索和攻击评测必须使用同一个值；余弦预检索会额外生成对应的 .meta.json，评测会校验该文件，拒绝混用不同评分方式的候选分数。
 
 ### 3.3 生成攻击文本
 
@@ -328,14 +333,14 @@ python gen_adv_for_mcq.py \
 
 ### 3.4 实验方法
 
-每个 query 的评测过程如下：先读取预生成的检索结果和对抗文本，将对抗文本按检索分数与正常文档混排；随后执行可选防御，最后由生成模型回答。实验不在运行时重新生成攻击文本。
+每个 query 的评测过程如下：先读取预生成的检索结果和该题专属的 5 篇对抗文本，按同一相似度定义与正常文档混排；随后执行可选防御，最后由生成模型回答。实验不在运行时重新生成黑盒攻击文本；HotFlip 会针对当前检索器生成前缀。
 
 ```text
 Query + 预生成检索结果 + 预生成攻击文本
                     ↓
             按分数混排候选文档
                     ↓
-  TrustRAG / 医学语义聚类 / Judge / RiD（可选）
+  BIOS KG 风险重排 / TrustRAG / 医学语义聚类 / Judge / RiD（按配置）
                     ↓
             Agentic 或普通 RAG 生成
                     ↓
@@ -354,12 +359,37 @@ Query + 预生成检索结果 + 预生成攻击文本
 
 | 组件 | 开关 | 作用与边界 |
 |------|------|------|
-| Judge | `judge_model_name` | 识别乱码、提示注入、答非所问等可疑上下文。Agentic 模式下先过滤初始 top-k，并在每次实际搜索时再次过滤。 |
-| Agentic RAG | `agentic_rag=True` | 多轮“生成搜索意图 → 注入候选证据 → 继续推理”。当前复用同一批 top-k 候选，不重新查询全库。 |
-| Reason-in-Docs | `reason_in_docs=True` | 逐篇提取与问题有关的信息，降低长上下文噪声；本身不是恶意过滤。 |
+| Judge | `judge_model_name` | 识别乱码、提示注入、答非所问等可疑上下文。动态 Agentic 模式下，它在每轮 TrustRAG 之后、RiD 之前检查原始证据；若不足 `top_k`，只回退到 TrustRAG/医学聚类已保留的池。 |
+| Agentic RAG | `agentic_rag=True` | 默认每个搜索标签都会触发新检索：本地 BM25 全库候选 → 当前检索器按 dot/cos 重排 → 防御 → 继续推理。`--no-agentic-live-retrieval` 仅用于复现旧版反复注入同一 top-k 的历史行为。 |
+| Reason-in-Docs | `reason_in_docs=True` | 逐篇提取与问题有关的信息，降低长上下文噪声；本身不是恶意过滤。动态 Agentic 中它位于 TrustRAG/Judge 之后。 |
 | RiD 严格模式 | `rid_defense=True` | 仅在 `reason_in_docs=True` 时生效；额外删除无关、误导或证据不足文档，可能同时误删有效医学证据。 |
-| TrustRAG | `trustrag_filter=True` | 固定执行 ROUGE-L 近重复门控、KMeans 聚类过滤，以及内部知识/冲突消解/最终回答三阶段。 |
+| TrustRAG | `trustrag_filter=True` | 单轮 RAG 时执行聚类过滤和内部知识/冲突消解/最终回答三阶段；与 Agentic 同开时，作为每轮原始证据的簇过滤器，最终回答由 Agentic 生成。 |
 | 医学语义聚类 | `medical_semantic_clustering=True` | 用 MedCPT Article Encoder 对候选医学文档聚类，额外过滤高凝聚的可疑模板簇；可与 TrustRAG 叠加。 |
+| BIOS 医学知识图谱 | `medical_kg_filter=True` | **仅普通单轮 RAG（`entrypoint="standard"`）已接入，默认开启。** 先从 reserve 候选池（默认 10 篇）抽取医学三元组，再按“关系 → 合法实体端点 → 图中真实边”验证，以风险分重排为最终 `top_k`。默认 `original`：任一未验证三元组即高风险；`conservative`：低置信度 `unknown` 不扣分。该组件使用的公开 BIOS-v3 工件是可复现的近似变体，不应与论文未公开的精简图快照混称。 |
+
+
+#### AgenticRAG + TrustRAG + Judge 的组合顺序
+
+当 `agentic_rag=True`、`trustrag_filter=True` 且 Judge 已配置时，Agentic 是外层控制器。每次模型输出搜索标签后，入口按如下顺序处理该轮，而不是将三个开关当作互斥分支：
+
+```text
+Agentic 生成 search query
+  → 本地 BM25 从全库取 agentic_retrieval_candidate_k 个候选（默认 100）
+  → 当前评测检索器按 score_function=dot/cos_sim 重排
+  → 混入该原始题目自己的 5 篇攻击文本，并按同一 search query 重新打分
+  → 截取 reserve candidate_k（默认 10）
+  → TrustRAG（→ 可选医学语义聚类）
+  → LLM-as-Judge
+  → 保留原始排序中的 top_k（默认 5）
+  → 可选 Reason-in-Documents
+  → 注入 Agentic 下一轮推理
+```
+
+Judge 的证据下限回退只恢复其输入的 **post-TrustRAG/post-cluster** 候选，绝不会重新加入被 TrustRAG 或医学聚类删除的文档。每题的结果 JSON 会记录每轮生成的 query、候选文档 ID/分数、每层过滤统计及最终保留集合；攻击文本始终限定为该题 own-5，绝不跨题混入。
+
+动态稠密检索采用显式的两阶段实现：BM25 负责全库候选生成，当前 Contriever/DPR/ANCE 等编码器负责对这些候选按本实验的 dot 或 cosine 定义重排。它不是原始问题离线 top-100 JSON 的伪复用，也不应在未匹配候选生成方式时与“离线全库稠密检索”结果混称为同一检索口径。动态模式要求目标语料有本地 BM25 索引；缺失时程序会报错，而不会悄悄退回静态 top-k。
+
+TrustRAG 的三阶段冲突作答与 Agentic 的最终作答不能同时充当最终回答器。因此二者同开时，TrustRAG 只负责每轮候选过滤；Agentic 在完成搜索后输出最终答案。`rag_max_turns` 用尽时，系统会额外请求一次不允许继续搜索的最终回答，避免把搜索标签本身当作预测结果。
 
 ### 3.5 集中配置运行
 
@@ -379,8 +409,9 @@ python run_experiment_from_config.py
 | 检索 | `eval_model_code`、`eval_dataset`、`retrieval_results_path`、`top_k`、`gpu_id` | 选择模型、语料、检索文件和 GPU。 |
 | 攻击与规模 | `attack_method`、`adv_json_path`、`target_ids_path`、`M`、`repeat_times` | 选择攻击、评测 query 和重复轮数。 |
 | LLM 与 Judge | `model_name`、`judge_model_name` | 选择回答模型与恶意文本裁判；Judge 写 `"None"` 即关闭。 |
-| Agentic / RiD | `agentic_rag`、`reason_in_docs`、`rid_defense`、`rag_max_turns` | 控制多轮推理与逐篇文档处理。 |
-| 聚类防御 | `trustrag_filter`、`medical_semantic_clustering` 及其路径/阈值 | 选择 TrustRAG 和医学语义聚类。 |
+| Agentic / RiD | `agentic_rag`、`agentic_live_retrieval`、`agentic_retrieval_candidate_k`、`agentic_dense_batch_size`、`agentic_doc_cache_size`、`reason_in_docs`、`rid_defense`、`rag_max_turns` | 控制动态多轮检索、有界向量缓存与逐篇文档处理。 |
+| TrustRAG / 医学聚类 | `trustrag_filter`、`medical_semantic_clustering` 及其路径/阈值 | 选择 TrustRAG 和医学语义聚类。 |
+| BIOS KG 防御（标准入口） | `medical_kg_filter`、`medical_kg_mode`、`medical_kg_decision_mode`、`medical_kg_hard_filter_threshold`、`medical_kg_artifact_dir`、`medical_kg_candidate_k`、`medical_kg_rerank_weight`、`medical_kg_match_threshold`、`medical_kg_encoder_path`、`medical_kg_device`、`medical_kg_batch_size`、`medical_kg_max_chars`、`medical_kg_max_triplets`、`medical_kg_ner_config_path`、`medical_kg_triplet_cache_path`、`medical_kg_triplet_cache_namespace` | 默认启用 `original` 二值风险和 `rerank`；可显式选择直接硬剔除。 |
 
 为确保不同实验可直接比较，以下设置已在程序中固定，不在配置文件暴露：对抗文本始终从预生成 JSON 读取、ASR 始终使用严格匹配、标注真值上下文始终关闭。
 
@@ -393,6 +424,7 @@ python run_experiment_from_config.py
 "reason_in_docs": False,
 "trustrag_filter": False,
 "medical_semantic_clustering": False,
+"medical_kg_filter": False,
 
 # Agentic + Judge，未启用 RiD
 "judge_model_name": "gpt4.1mini",
@@ -404,6 +436,93 @@ python run_experiment_from_config.py
 "trustrag_filter": True,
 "medical_semantic_clustering": True,
 ```
+
+#### BIOS 医学知识图谱防御（标准单轮 RAG）
+
+`main.py` 的默认值与 `experiment_config.py` 都已设置为启用 KG 防御和 `original` 模式。要让集中配置实际使用此组件，先将运行入口设为普通单轮 RAG：
+
+```python
+"entrypoint": "standard",
+"medical_kg_filter": True,
+"medical_kg_mode": "original",
+"medical_kg_artifact_dir": "datasets/medical_kg/bios_v3_clinical_priority_20260812",
+```
+
+其中，`original` 与论文的段落级二值判定保持一致：一篇文档只要存在未被 BIOS 图谱验证的三元组，风险即为 1；`conservative` 则把低相似度映射得到的 `unknown` 保持中性，以降低公开图谱覆盖不完整造成的误删。KG 首先重排 `medical_kg_candidate_k` 篇候选（默认 10），然后只把最终 `top_k` 篇交给后续 TrustRAG 或回答模型；它不会重新生成检索文件。
+
+KG 当前的排序分数为 `(1 - medical_kg_rerank_weight) × 归一化检索分数 + medical_kg_rerank_weight × (1 - KG 风险)`。集中配置默认设为 `0.80`，即检索分数与安全分数按 2:8 合成；这会加强高风险文档的降权，但不会像严格硬过滤那样直接删除它们。
+
+#### 工作流程、模式与边界
+
+医疗 KG 的处理顺序固定如下；它操作的是已有检索结果，不会重建索引、重跑检索，也不会改写对抗文本。
+
+```text
+raw-dot 检索 top-10
+  → LLM 抽取每篇文档的（实体 1，关系，实体 2）
+  → MedCPT 映射关系与该关系允许的实体端点
+  → 查询 BIOS 是否存在对应真实边
+  → 计算二值文档风险
+  → rerank 选出 top-5，或 hard_filter 直接删除高风险文档
+  → （可选）原版 TrustRAG → 回答模型
+```
+
+| 项目 | `original` | `conservative` |
+|---|---|---|
+| 三元组映射 | 按原文式严格边验证 | 额外使用 `medical_kg_match_threshold` 判断低置信映射 |
+| 风险计算 | 任一三元组为 `invalid` 或 `unknown`，文档风险即为 1 | `invalid / (valid + invalid)`；`unknown` 中性，若没有可判定三元组则风险为 0 |
+| 适用性 | 与论文段落级筛查口径最接近 | 用于公开 BIOS 覆盖不完整时降低误删 |
+
+当前实现只提供上述**二值风险**。此前的连续证据风险公式已移除，不能再通过配置或命令行启用；历史结果目录只用于追溯，不应用于复现实验。
+
+KG 仅接入 `entrypoint="standard"`。和 TrustRAG 同开时，KG 先从 top-10 选出最终候选，原版 TrustRAG 随后处理这些候选；二者都不会把已被前一层删除的文档重新补回。医疗语义聚类是独立模块，若开启则在 TrustRAG 之后运行。
+
+常用配置：
+
+```python
+# KG 重排，安全分 : 检索分 = 3:7，并叠加原版 TrustRAG
+"entrypoint": "standard",
+"medical_kg_filter": True,
+"medical_kg_mode": "original",
+"medical_kg_decision_mode": "rerank",
+"medical_kg_rerank_weight": 0.30,
+"trustrag_filter": True,
+
+# 1:0：识别为高风险即删除，不启用 TrustRAG
+"medical_kg_filter": True,
+"medical_kg_mode": "original",
+"medical_kg_decision_mode": "hard_filter",
+"medical_kg_hard_filter_threshold": 1.0,
+"trustrag_filter": False,
+
+# 无防御基线：必须显式关闭默认开启的 KG
+"medical_kg_filter": False,
+"trustrag_filter": False,
+"medical_semantic_clustering": False,
+"judge_model_name": "None",
+```
+
+#### 直接剔除已识别恶意文档
+
+默认 `medical_kg_decision_mode="rerank"` 只会降低高风险文档排序。若实验需要“安全 : 检索 = 1:0”的直接剔除口径，使用：
+
+```bash
+--medical_kg_decision_mode hard_filter \
+--medical_kg_hard_filter_threshold 1.0
+```
+
+此时 `original` 二值规则标为 `kg_risk=1` 的候选会在回答前直接删除；剩余文档保持原始检索顺序，**不会**为了凑足 `top_k` 把已删候选放回。因而最终上下文可能少于 5 篇，甚至为空；结果会记录 `medical_kg_hard_filtered_count` 和每篇文档的 `hard_filtered` 标记。
+
+公开 BIOS-v3 的构建输入位于 `/home/Dataset/BIOS_v3/`。当前默认工件为 `datasets/medical_kg/bios_v3_english_pt_full_20260813`：保留英文 preferred-term 节点之间、医学三元组验证使用的全部 13 类关系边，**不做关系配额、reservoir 抽样或低优先级关系排除**；`associated with` 也会进入图并接受严格验证。仅保留英文 PT 是论文“去同义词节点”预处理的可复现近似，不等同于随机抽样。旧的 `bios_v3_clinical_priority_20260812` 与 `bios_v3_preferred_sample_20260803` 均保留作历史对照，结果不得与全量工件混称。三者都不是论文未公开的原始精简图快照；若取得论文规范图，应以 `scripts/build_bios_refined_kg.py --triples-json <ground_truth.json>` 重建并在配置中替换路径。
+
+临时关闭默认 KG 防御可在直接运行时加：
+
+```bash
+python main.py --no_medical_kg_filter ...
+```
+
+三元组缓存会在抽取每篇候选文档后追加写入 `results/medical_kg_caches/`，因此每组完成后均保留可复用缓存。缓存键由文档文本、抽取长度、最大三元组数和命名空间生成；内容只有文档哈希与三元组，不含问题、答案、金标、目标标签或排序分数。相同数据集的“KG-only”和“KG + TrustRAG”可安全复用该缓存；若更换抽取模型、提示词或输出格式，须修改 `medical_kg_triplet_cache_namespace`。
+
+结果 JSON 中每题都会记录 `medical_kg_filter_enabled`、`medical_kg_filter_applied`、`medical_kg_mode`、`medical_kg_decision_mode`、`medical_kg_rerank_weight`、有效/无效/未知/`ignored` 三元组计数、`medical_kg_document_audits`，以及直接剔除时的 `medical_kg_hard_filtered_count`。这些字段用于核对防御是否真正生效；比较实验时应同时固定检索文件、攻击文本、`top_k`、ASR 严格匹配口径和 KG 工件路径。
 
 ### 3.6 微调医学对抗鲁棒检索器 `contriever_v1` / `contriever_v2`
 
@@ -458,6 +577,19 @@ CUDA_VISIBLE_DEVICES=0 python -m contriever_stage1.train \
 
 每个 epoch 都会记录训练损失、正例/两类负例的平均相似度、两种 gap、`Positive > Negative` 准确率，并保存 `checkpoint/contriever_v1/epoch*/`。`best_model/` 由验证损失、平均 gap 和两种准确率共同决定。`final_evaluation.json` 给出微调前后在固定随机抽取 100 条训练样本上的对比；它用于训练过程诊断，不应视为独立测试集结果。
 
+#### `contriever_v6`：无 MIRAGE PubMedQA 泄漏对照
+
+v4 的 PQA-L 组成包含 MIRAGE PubMedQA 的评测题，因此不能用于检验未见题上的防御泛化。v6 保留 v4 的 9,174 条 PQA-U 样本，并从原始 PQA-U 以固定随机种子补入 1,000 条样本；`scripts/prepare_contriever_v6_pubmedqa.py` 会在生成和合并阶段强制拒绝与 MIRAGE PubMedQA query 重合的记录。v6 的 PubMedQA/MedQA 训练规模仍为 10,174:10,174，且训练超参数、原始 Contriever 初始化和 8:8 replay batch 与 v4 一致。
+
+准备完成后，必须同时满足以下条件才可训练或评测：
+
+- `checkpoint/contriever_v6/input/leakage_manifest.json` 中 `mirage_overlap` 为 `0`；
+- 黑盒与 HotFlip JSONL 通过 `scripts/validate_training_data.py`；
+- 正式检索结果由 `evaluate_beir.py --score_function cos_sim` 生成，并存在匹配的 `.meta.json`；
+- 正式攻击评测采用每题 own-5 攻击文本和严格指定 `target_label` 的 ASR。
+
+`contriever_v6` 默认加载 `checkpoint/contriever_v6/best_model`；若存放在其他位置，可设置 `CONTRIEVER_V6_PATH`。
+
 #### 使用微调后的检索器
 
 `contriever_v1` 与 `contriever_v2` 默认分别查找 `checkpoint/contriever_v1/best_model`、`checkpoint/contriever_v2/best_model`。若模型存放在其他位置，先显式指定路径：
@@ -472,9 +604,9 @@ export CONTRIEVER_V2_PATH=/absolute/path/to/checkpoint/contriever_v2/best_model
 ```bash
 CUDA_VISIBLE_DEVICES=0 python -u evaluate_beir.py \
   --model_code contriever_v2 \
-  --dataset pubmed --split test --top_k 100 \
+  --dataset pubmed --split test --top_k 100 --score_function cos_sim \
   --queries-json results/adv_targeted_results/mirage_pubmedqa_all.queries.json \
-  --result_output results/beir_results/mirage_pubmedqa_all-contriever_v2.json
+  --result_output results/beir_results/mirage_pubmedqa_all-contriever_v2-cos.json
 ```
 
 随后可与任意攻击模式一起评测：
@@ -486,7 +618,8 @@ CUDA_VISIBLE_DEVICES=0 python -u main.py \
   --attack_method hotflip --adv_source json \
   --adv_json_path results/adv_targeted_results/mirage_pubmedqa_all.json \
   --target_ids_path results/adv_targeted_results/mirage_pubmedqa_all.ids \
-  --retrieval_results_path results/beir_results/mirage_pubmedqa_all-contriever_v2.json \
+  --retrieval_results_path results/beir_results/mirage_pubmedqa_all-contriever_v2-cos.json \
+  --score_function cos_sim \
   --adv_per_query 5 --M 500 --repeat_times 1 \
   --name pubmed_contriever_v2_gpt41mini_hotflip
 ```
@@ -516,9 +649,9 @@ Ending...
 
 | 指标 | 含义 |
 |------|------|
-| **ASR Mean** | 攻击成功率 — 被对抗文本误导导致错误回答的问题占比 |
+| **ASR Mean** | 攻击成功率。MCQ 仅在输出攻击源指定的错误选项时计为成功；不是任意答错率。 |
 | **ASR** | 逐轮次的 ASR 列表（每轮 M 个 query） |
-| **F1 (pre-defense)** | 裁判过滤**前**的对抗文本检索成功率（仅当启用 judge 时显示） |
+| **F1 (pre-defense)** | 裁判过滤**前**本题专属攻击文本的检索成功率（仅当启用 judge 时显示） |
 | **F1 (post-defense)** | 裁判过滤**后**的对抗文本残留率 |
 | **Precision / Recall** | 对抗文本在 top-K 检索结果中的精确率 / 召回率 |
 
@@ -550,3 +683,12 @@ grep -aE "Namespace|Using|Doing|ASR Mean|F1 mean|Ending" logs/user_runs_logs/*.o
 | 检索结果 | `results/beir_results/` | `.json` |
 | 评测结果（逐 query 详情） | `results/query_results/<dir>/<name>.json` | `.json` |
 | 运行日志 | `logs/user_runs_logs/<name>.out` | 文本 |
+
+## Current evaluation-integrity rules
+
+- PubMedQA is evaluated with its declared closed label space: yes, no, and maybe. Every direct, TrustRAG, Agentic, and Reason-in-Documents path receives that same label space.
+- A parsed closed-label answer must be exactly one declared token after removal of model-control wrappers. Punctuation, explanations, or multiple labels are recorded as unparsed rather than silently coerced.
+- Retrieval F1 defines a query with zero precision and zero recall as F1 = 0. This prevents undefined values from contaminating aggregate metrics.
+- TrustRAG uses the legacy KMeans+ROUGE selection behavior for compatibility experiments. It may delete to fewer than top_k documents; this is a defense-algorithm choice, while own-5 injection, raw-dot scoring, closed-label parsing, strict ASR, and F1 handling remain unchanged.
+- Judge filtering operates on the reserve candidate pool. If fewer than top_k documents would remain, it restores the original ranked candidates and records the retention fallback; it never passes an empty evidence set to answering.
+- TrustRAG raw evidence is quoted as untrusted data in the final verification stage. A run started before a code change remains a pre-change result and must not be combined with post-change results.

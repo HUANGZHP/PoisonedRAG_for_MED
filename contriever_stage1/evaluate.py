@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+import os
 from typing import Dict, Iterable, List, Sequence
 
 import torch
@@ -33,10 +34,10 @@ class EvaluationMetrics:
 
 def _forward_loss(model: torch.nn.Module, batch: Dict[str, Dict[str, torch.Tensor]], temperature: float) -> LossOutput:
     """用官方 Mean Pooling 与 L2 Normalize 获取四组嵌入并计算损失。"""
-    query_embeddings = model(**batch["query"], normalize=True)
-    positive_embeddings = model(**batch["positive"], normalize=True)
-    blackbox_embeddings = model(**batch["blackbox_negative"], normalize=True)
-    hotflip_embeddings = model(**batch["hotflip_negative"], normalize=True)
+    query_embeddings = model(**batch["query"], normalize=os.environ.get("CONTRIEVER_TRAIN_SCORE_FUNCTION", "cos_sim") == "cos_sim")
+    positive_embeddings = model(**batch["positive"], normalize=os.environ.get("CONTRIEVER_TRAIN_SCORE_FUNCTION", "cos_sim") == "cos_sim")
+    blackbox_embeddings = model(**batch["blackbox_negative"], normalize=os.environ.get("CONTRIEVER_TRAIN_SCORE_FUNCTION", "cos_sim") == "cos_sim")
+    hotflip_embeddings = model(**batch["hotflip_negative"], normalize=os.environ.get("CONTRIEVER_TRAIN_SCORE_FUNCTION", "cos_sim") == "cos_sim")
     return multiple_negatives_info_nce(
         query_embeddings, positive_embeddings, blackbox_embeddings, hotflip_embeddings, temperature
     )

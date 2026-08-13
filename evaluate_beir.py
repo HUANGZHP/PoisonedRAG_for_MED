@@ -5,7 +5,7 @@ import os
 import json
 import torch
 import transformers
-from typing import Dict
+from typing import Dict, Optional
 from tqdm import tqdm
 
 from beir import LoggingHandler
@@ -14,13 +14,12 @@ from beir.retrieval.evaluation import EvaluateRetrieval
 from src.contriever_src.contriever import Contriever
 from src.contriever_src.beir_utils import DenseEncoderModel
 from src.utils import load_beir_datasets, get_medrag_retrieval_system
-from src.medrag_corpus import MedCorpus
 from medrag_retriever import MedCPTRetriever
 
 import argparse
 parser = argparse.ArgumentParser(description='test')
 
-parser.add_argument('--model_code', type=str, default="contriever", choices=["contriever", "contriever_v1", "contriever_v2", "contriever_v3", "contriever_v4", "contriever_v5", "contriever-msmarco", "contriever-chinese", "dpr", "ance", "bm25", "medcpt"])
+parser.add_argument('--model_code', type=str, default="contriever", choices=["contriever", "contriever_v1", "contriever_v2", "contriever_v3", "contriever_v4", "contriever_v5", "contriever_v6", "contriever_v7", "contriever_v8", "contriever-msmarco", "contriever-chinese", "contriever-chinese_v1", "dpr", "ance", "bm25", "medcpt"])
 parser.add_argument('--score_function', type=str, default='dot', choices=['dot', 'cos_sim'])
 parser.add_argument('--top_k', type=int, default=100)
 parser.add_argument(
@@ -38,8 +37,9 @@ parser.add_argument('--gpu_id', type=int, default=0)
 parser.add_argument('--gpu_ids', type=str, default='', help='Comma-separated GPU ids for multi-GPU FAISS (e.g. "0,1,2,3")')
 parser.add_argument('--use_faiss_gpu', action=argparse.BooleanOptionalAction, default=False, help='Move MedCPT FAISS index to GPU when available')
 parser.add_argument("--per_gpu_batch_size", default=64, type=int, help="Batch size per GPU/CPU for indexing.")
-parser.add_argument('--max_length', type=int, default=128)
+parser.add_argument('--max_length', type=int, default=512, help='Contriever 编码最大长度；应与训练和攻击评测保持一致。')
 parser.add_argument('--medcpt_query_encoder_path', type=str, default='', help='Local path for MedCPT query encoder')
+parser.add_argument('--allow-beir-fallback', action=argparse.BooleanOptionalAction, default=False, help='仅在 MedCPT 本地索引失败时允许改用 BEIR 全库重编码；默认关闭以保持检索协议一致。')
 parser.add_argument('--show-progress', action=argparse.BooleanOptionalAction, default=True, help='Show progress bars for corpus/query loops')
 parser.add_argument('--query', type=str, default='', help='Single query text used when dataset has no built-in queries')
 parser.add_argument('--queries-json', type=str, default='', help='Path to custom queries json when dataset has no built-in queries')
@@ -48,6 +48,9 @@ parser.add_argument('--mirage-benchmark-path', type=str, default=os.path.join(os
 parser.add_argument('--mirage-dataset', type=str, default='auto', help='MIRAGE subset name (auto/pubmedqa/medqa/medmcqa/mmlu/bioasq/all)')
 
 args = parser.parse_args()
+
+if args.max_length <= 0 or args.max_length > 512:
+    parser.error("--max_length must be an integer in [1, 512] for the BERT-based encoders in this script.")
 
 from src.utils import model_code_to_cmodel_name, model_code_to_qmodel_name
 
@@ -118,37 +121,41 @@ def _build_fallback_queries(args) -> Dict[str, str]:
         if queries:
             return queries
         raise ValueError(f"No valid queries found in --queries-json file: {query_json_path}")
+    raise FileNotFoundError(
+        "Dataset has no built-in queries. Please provide --query \"...\" or --queries-json /path/to/queries.json."
+    )
 
 
 def apply_tokenizer_max_length(model, max_length: int) -> None:
-    """BEIR DPR enables truncation but may leave tokenizer.model_max_length unset."""
-    if not max_length or max_length <= 0:
-        return
+    """Bound every discoverable BEIR DPR tokenizer without altering model weights/config."""
+    if max_length <= 0 or max_length > 512:
+        raise ValueError(f"Unsupported DPR max_length={max_length}; expected a value in [1, 512].")
 
     target_models = [model]
     wrapped_model = getattr(model, "model", None)
     if wrapped_model is not None and wrapped_model is not model:
         target_models.append(wrapped_model)
 
+    updated = []
     for target in target_models:
         for attr in ("q_tokenizer", "ctx_tokenizer", "tokenizer"):
             tokenizer = getattr(target, attr, None)
             if tokenizer is not None:
                 tokenizer.model_max_length = max_length
+                updated.append(f"{target.__class__.__name__}.{attr}")
 
-        for attr in ("q_model", "ctx_model", "model"):
-            encoder = getattr(target, attr, None)
-            config = getattr(encoder, "config", None)
-            if config is not None:
-                config.max_position_embeddings = min(
-                    getattr(config, "max_position_embeddings", max_length),
-                    max_length,
-                )
+        if hasattr(target, "max_length"):
+            target.max_length = max_length
+            updated.append(f"{target.__class__.__name__}.max_length")
 
-    raise FileNotFoundError(
-        "Dataset has no built-in queries. Please provide --query \"...\" or --queries-json /path/to/queries.json."
-    )
-
+    if not updated:
+        logging.warning(
+            "Could not locate a tokenizer attribute on the BEIR DPR wrapper; "
+            "its implementation must receive max_length=%d explicitly before fallback is used.",
+            max_length,
+        )
+    else:
+        logging.info("Configured BEIR DPR tokenizer length=%d on %s", max_length, ", ".join(updated))
 
 def _default_mirage_dataset_for(dataset: str) -> str:
     ds = (dataset or "").strip().lower()
@@ -250,7 +257,7 @@ def retrieve_with_medrag_system(corpus: Dict[str, Dict[str, str]], queries: Dict
 
 
 def retrieve_with_medcpt_retriever(
-    corpus: Dict[str, Dict[str, str]],
+    corpus: Optional[Dict[str, Dict[str, str]]],
     queries: Dict[str, str],
     retriever: MedCPTRetriever,
     top_k: int,
@@ -261,11 +268,12 @@ def retrieve_with_medcpt_retriever(
     if show_progress:
         query_iter = tqdm(query_iter, total=len(queries), desc="Retrieving", unit="query")
     for query_id, query_text in query_iter:
-        hits = retriever.retrieve(query_text, k=max(top_k, 2000))
+        retrieval_k = top_k if corpus is None else max(top_k, 2000)
+        hits = retriever.retrieve(query_text, k=retrieval_k)
         query_results = {}
         for hit in hits:
             doc_id = str(hit.get("id", ""))
-            if doc_id and doc_id in corpus:
+            if doc_id and (corpus is None or doc_id in corpus):
                 query_results[doc_id] = float(hit.get("score", 0.0))
         results[str(query_id)] = query_results
     return results
@@ -313,9 +321,8 @@ else:
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 
-logging.info("Loading dataset...")
-corpus, _, _ = load_beir_datasets(args.dataset, args.split, require_queries=False, require_qrels=False)
 queries = {}
+corpus = None
 
 if args.prefer_mirage_queries:
     try:
@@ -337,20 +344,29 @@ if args.prefer_mirage_queries:
     except Exception as exc:
         logging.warning("Failed loading MIRAGE queries: %s", exc)
 
-if not queries:
-    try:
-        _, built_in_queries, _ = load_beir_datasets(args.dataset, args.split, require_queries=True, require_qrels=False)
-        queries = built_in_queries
-        logging.info("Loaded %d built-in dataset queries", len(queries))
-    except FileNotFoundError as exc:
-        err = str(exc)
-        if "Queries not found for MedRAG dataset" not in err:
-            raise
-
-        logging.warning("%s", err)
-        logging.warning("Falling back to user-provided queries via --query/--queries-json.")
+if args.model_code == "medcpt":
+    logging.info("MedCPT native-index path: deferring full corpus load; document IDs come from FAISS metadata.")
+    if not queries:
         queries = _build_fallback_queries(args)
-        logging.info("Loaded %d fallback queries", len(queries))
+        logging.info("Loaded %d user-provided query/queries for MedCPT", len(queries))
+else:
+    logging.info("Loading dataset...")
+    corpus, _, _ = load_beir_datasets(args.dataset, args.split, require_queries=False, require_qrels=False)
+
+    if not queries:
+        try:
+            _, built_in_queries, _ = load_beir_datasets(args.dataset, args.split, require_queries=True, require_qrels=False)
+            queries = built_in_queries
+            logging.info("Loaded %d built-in dataset queries", len(queries))
+        except FileNotFoundError as exc:
+            err = str(exc)
+            if "Queries not found for MedRAG dataset" not in err:
+                raise
+
+            logging.warning("%s", err)
+            logging.warning("Falling back to user-provided queries via --query/--queries-json.")
+            queries = _build_fallback_queries(args)
+            logging.info("Loaded %d fallback queries", len(queries))
 
 # grp: If you want to use other datasets, you could prepare your dataset as the format of beir, then load it here.
 
@@ -358,14 +374,11 @@ results = None
 if args.model_code == "medcpt":
     try:
         medcpt_query_encoder_path = args.medcpt_query_encoder_path.strip() or os.environ.get("MEDCPT_QUERY_ENCODER_PATH", "").strip() or None
-        med_corpus = MedCorpus(
-            base_dir=os.path.join(os.getcwd(), "datasets"),
-            sources=[args.dataset],
-            show_progress=args.show_progress,
-        )
         medcpt_retriever = MedCPTRetriever(
-            corpus=med_corpus,
+            index_base_dir=os.path.join(os.getcwd(), "datasets"),
+            sources=[args.dataset],
             query_encoder_name=medcpt_query_encoder_path,
+            max_length=args.max_length,
             faiss_gpu_devices=visible_faiss_gpu_ids,
             use_faiss_gpu=args.use_faiss_gpu,
             use_mmap=True,
@@ -373,7 +386,25 @@ if args.model_code == "medcpt":
         logging.info("Using MedCPTRetriever on local prebuilt MedCPT index for %s", args.dataset)
         results = retrieve_with_medcpt_retriever(corpus, queries, medcpt_retriever, args.top_k, show_progress=args.show_progress)
     except Exception as exc:
-        logging.warning("MedCPTRetriever init/retrieval failed, fallback to BEIR path: %s", exc)
+        if args.allow_beir_fallback:
+            logging.warning(
+                "MedCPTRetriever init/retrieval failed; explicit BEIR fallback enabled: %s",
+                exc,
+            )
+            if corpus is None:
+                logging.info("Loading corpus only because explicit BEIR fallback was requested.")
+                corpus, _, _ = load_beir_datasets(
+                    args.dataset,
+                    args.split,
+                    require_queries=False,
+                    require_qrels=False,
+                )
+        else:
+            raise RuntimeError(
+                "MedCPT local-index retrieval failed. Refusing to silently switch to BEIR full-corpus "
+                "re-encoding because that changes the retrieval protocol and can exhaust memory. "
+                "Fix the local-index error, or rerun only if you explicitly pass --allow-beir-fallback."
+            ) from exc
 elif args.model_code == "bm25":
     medrag_system = get_medrag_retrieval_system(args.model_code, args.dataset)
     if medrag_system is not None:
@@ -382,12 +413,20 @@ elif args.model_code == "bm25":
 
 if results is None:
     logging.info("Loading BEIR retriever model...")
-    if args.model_code in ('contriever', 'contriever_v1', 'contriever_v2', 'contriever_v3', 'contriever_v4', 'contriever_v5', 'contriever-msmarco', 'contriever-chinese'):
+    if args.model_code in ('contriever', 'contriever_v1', 'contriever_v2', 'contriever_v3', 'contriever_v4', 'contriever_v5', 'contriever_v6', 'contriever_v7', 'contriever_v8', 'contriever-msmarco', 'contriever-chinese', 'contriever-chinese_v1'):
         encoder = Contriever.from_pretrained(model_code_to_cmodel_name[args.model_code])
         encoder = encoder.to(device)
         tokenizer = transformers.BertTokenizerFast.from_pretrained(model_code_to_cmodel_name[args.model_code])
+        use_cosine = args.score_function == 'cos_sim'
         model = DRES(
-            DenseEncoderModel(encoder, doc_encoder=encoder, tokenizer=tokenizer),
+            DenseEncoderModel(
+                encoder,
+                doc_encoder=encoder,
+                tokenizer=tokenizer,
+                max_length=args.max_length,
+                norm_query=use_cosine,
+                norm_doc=use_cosine,
+            ),
             batch_size=args.per_gpu_batch_size,
             show_progress_bar=args.show_progress,
         )
@@ -426,5 +465,24 @@ if results is None:
 logging.info("Printing results to %s"%(args.result_output))
 sub_results = compress(results)
 
+os.makedirs(os.path.dirname(args.result_output) or '.', exist_ok=True)
 with open(args.result_output, 'w', encoding='utf-8') as f:
     json.dump(sub_results, f)
+
+# 与结果文件同行保存评分元信息，评测入口会据此拒绝混用 dot 与 cosine 的候选分数。
+metadata_path = f"{args.result_output}.meta.json"
+metadata = {
+    "format_version": 1,
+    "score_function": args.score_function,
+    "model_code": args.model_code,
+    "dataset": args.dataset,
+    "split": args.split,
+    "max_length": args.max_length,
+    "top_k": args.top_k,
+    "queries_json": args.queries_json,
+    "prefer_mirage_queries": args.prefer_mirage_queries,
+    "mirage_dataset": args.mirage_dataset,
+}
+with open(metadata_path, 'w', encoding='utf-8') as f:
+    json.dump(metadata, f, ensure_ascii=False, indent=2)
+logging.info("Saved retrieval metadata to %s", metadata_path)

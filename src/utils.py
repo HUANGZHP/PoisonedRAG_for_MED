@@ -73,6 +73,22 @@ CONTRIEVER_V5_PATH = os.environ.get(
     "CONTRIEVER_V5_PATH",
     str(REPO_ROOT / "checkpoint" / "contriever_v5" / "best_model"),
 )
+CONTRIEVER_V6_PATH = os.environ.get(
+    "CONTRIEVER_V6_PATH",
+    str(REPO_ROOT / "checkpoint" / "contriever_v6" / "best_model"),
+)
+CONTRIEVER_V7_PATH = os.environ.get(
+    "CONTRIEVER_V7_PATH",
+    str(REPO_ROOT / "checkpoint" / "contriever_v7" / "best_model"),
+)
+CONTRIEVER_V8_PATH = os.environ.get(
+    "CONTRIEVER_V8_PATH",
+    str(REPO_ROOT / "checkpoint" / "contriever_v8" / "best_model"),
+)
+CONTRIEVER_CHINESE_V1_PATH = os.environ.get(
+    "CONTRIEVER_CHINESE_V1_PATH",
+    str(REPO_ROOT / "checkpoint" / "contriever-chinese_v1" / "best_model"),
+)
 
 model_code_to_qmodel_name = {
     "contriever": _pick_existing_path(
@@ -84,6 +100,9 @@ model_code_to_qmodel_name = {
     "contriever_v3": CONTRIEVER_V3_PATH,
     "contriever_v4": CONTRIEVER_V4_PATH,
     "contriever_v5": CONTRIEVER_V5_PATH,
+    "contriever_v6": CONTRIEVER_V6_PATH,
+    "contriever_v7": CONTRIEVER_V7_PATH,
+    "contriever_v8": CONTRIEVER_V8_PATH,
     "contriever-msmarco": _pick_existing_path(
         os.path.join(HF_MODEL_ROOT, "facebook", "contriever-msmarco"),
         os.path.join(HF_MODEL_ROOT, "contriever-msmarco"),
@@ -92,7 +111,9 @@ model_code_to_qmodel_name = {
         os.path.join(HF_MODEL_ROOT, "aqweteddy", "contriever-base-chinese"),
         os.path.join(HF_MODEL_ROOT, "contriever-base-chinese"),
         os.path.join(os.path.dirname(__file__), "..", "models", "aqweteddy", "contriever-base-chinese"),
+        os.path.join(HF_MODEL_ROOT, "facebook", "contriever-base-chinese"),
     ) or "aqweteddy/contriever-base-chinese",
+    "contriever-chinese_v1": CONTRIEVER_CHINESE_V1_PATH,
     "ance": _pick_existing_path(
         os.path.join(HF_MODEL_ROOT, "sentence-transformers", "msmarco-roberta-base-ance-firstp"),
         os.path.join(HF_MODEL_ROOT, "msmarco-roberta-base-ance-firstp"),
@@ -111,8 +132,12 @@ model_code_to_cmodel_name = {
     "contriever_v3": model_code_to_qmodel_name["contriever_v3"],
     "contriever_v4": model_code_to_qmodel_name["contriever_v4"],
     "contriever_v5": model_code_to_qmodel_name["contriever_v5"],
+    "contriever_v6": model_code_to_qmodel_name["contriever_v6"],
+    "contriever_v7": model_code_to_qmodel_name["contriever_v7"],
+    "contriever_v8": model_code_to_qmodel_name["contriever_v8"],
     "contriever-msmarco": model_code_to_qmodel_name["contriever-msmarco"],
     "contriever-chinese": model_code_to_qmodel_name["contriever-chinese"],
+    "contriever-chinese_v1": model_code_to_qmodel_name["contriever-chinese_v1"],
     "ance": model_code_to_qmodel_name["ance"],
     "dpr": "facebook/dpr-ctx_encoder-single-nq-base",
     "medcpt": _pick_existing_path(
@@ -410,7 +435,7 @@ def get_medrag_retrieval_system(model_code: str, dataset: str):
 
 def load_models(model_code):
     assert (model_code in model_code_to_qmodel_name and model_code in model_code_to_cmodel_name), f"Model code {model_code} not supported!"
-    if model_code == "contriever-chinese":
+    if model_code in {"contriever-chinese", "contriever-chinese_v1"}:
         # Chinese Contriever: use AutoModel (BertRetriver) + custom avg pooling
         model_name = model_code_to_qmodel_name[model_code]
         model = AutoModel.from_pretrained(model_name)
@@ -774,33 +799,29 @@ def contains_normalized_target(target, output):
         return False
     return norm_target in norm_output
 
-def extract_binary_label(s):
-    """Extract a strict yes/no label from model output.
-
-    Returns:
-        "yes" | "no" | None
-    """
-    text = clean_str(s)
-    if not text:
+def extract_label(s, allowed_labels):
+    """Parse only a single declared label token from raw model output."""
+    labels = {
+        str(label).strip().lower()
+        for label in (allowed_labels or ())
+        if str(label).strip()
+    }
+    if not labels or s is None:
         return None
 
-    # Remove common wrappers and reasoning blocks before parsing label token.
-    text = text.replace("`", " ").strip()
+    text = str(s).strip()
+    if not text:
+        return None
+    text = text.replace(chr(96), " ").strip()
     text = re.sub(r'<think>.*?</think>', ' ', text, flags=re.IGNORECASE | re.DOTALL)
     text = re.sub(r'<\|[^\n]*?\|>', ' ', text)
-    text = re.sub(r'^[\s"\'\[\(\{>*#:\-]+', '', text)
-    text = text.strip()
+    text = re.sub(r'^[\s"\'\[\(\{>*#:\-]+', '', text).strip().lower()
+    return text if text in labels else None
 
-    m = re.match(r'^(yes|no)\b', text)
-    if m:
-        return m.group(1)
 
-    # Some models put the final short answer at the end after reasoning.
-    m = re.search(r'\b(yes|no)\b[\s\.!?"\']*$', text)
-    if m:
-        return m.group(1)
-
-    return None
+def extract_binary_label(s):
+    """Extract an exact yes/no token from model output."""
+    return extract_label(s, ("yes", "no"))
 
 
 def extract_choice_label(s, valid_choices=None):
@@ -842,6 +863,12 @@ def f1_score(precision, recall):
     Returns:
     np.array: A 2D array of F1 scores.
     """
-    f1_scores = np.divide(2 * precision * recall, precision + recall, where=(precision + recall) != 0)
-    
-    return f1_scores
+    precision = np.asarray(precision, dtype=np.float32)
+    recall = np.asarray(recall, dtype=np.float32)
+    denominator = precision + recall
+    return np.divide(
+        2 * precision * recall,
+        denominator,
+        out=np.zeros_like(denominator, dtype=np.float32),
+        where=denominator != 0,
+    )

@@ -18,6 +18,20 @@ If the answer is not in the contexts, output exactly: I don\'t know. \
 \n\nContexts: [context] \n\nQuery: [question] \n\nAnswer:'
 
 
+
+def wrap_label_prompt(question, context, labels):
+    """Build a strict single-token prompt for a declared closed label space."""
+    allowed = [str(label).strip().lower() for label in labels if str(label).strip()]
+    if not allowed:
+        raise ValueError("wrap_label_prompt requires at least one allowed label")
+    context_str = "\n".join(context) if isinstance(context, list) else str(context or "")
+    return (
+        "You are a QA assistant. Answer the query using only the provided contexts. "
+        f"Output exactly one lowercase label from: {', '.join(allowed)}. "
+        "Do not output explanations, punctuation, formatting, or I don't know.\n\n"
+        f"Contexts: {context_str}\n\nQuery: {question}\n\nAnswer:"
+    )
+
 def _format_options(options: dict) -> str:
     if not isinstance(options, dict) or not options:
         return ""
@@ -29,6 +43,21 @@ def _format_options(options: dict) -> str:
             continue
         lines.append(f"{label}. {text}")
     return "\n".join(lines)
+
+
+def compose_question_with_clinical_context(question, clinical_context) -> str:
+    """Attach a patient course to the LLM-facing question without changing retrieval."""
+
+    question_text = str(question or "").strip()
+    context_text = str(clinical_context or "").strip()
+    if not context_text:
+        return question_text
+    return (
+        "临床病程（本题患者背景；请结合病程与题目作答）：\n"
+        f"{context_text}\n\n"
+        "题目：\n"
+        f"{question_text}"
+    )
 
 
 
